@@ -87,6 +87,18 @@ class TestRedshift(Validator):
             "DATEADD('day', ndays, caldate)", write={"redshift": "DATEADD(day, ndays, caldate)"}
         )
         self.validate_all(
+            "CONVERT_TIMEZONE('US/Pacific', caldate)",
+            write={
+                "spark": "FROM_UTC_TIMESTAMP(caldate, 'US/Pacific')",
+            },
+        )
+        self.validate_all(
+            "CONVERT_TIMEZONE('US/Eastern', 'US/Pacific', caldate)",
+            write={
+                "spark": "FROM_UTC_TIMESTAMP(TO_UTC_TIMESTAMP(caldate, 'US/Eastern'), 'US/Pacific')",
+            },
+        )
+        self.validate_all(
             'create table "group" ("col" char(10))',
             write={
                 "redshift": 'CREATE TABLE "group" ("col" CHAR(10))',
@@ -217,6 +229,12 @@ class TestRedshift(Validator):
         )
         self.validate_identity(
             "CREATE TABLE SOUP (SOUP1 VARCHAR(50) NOT NULL ENCODE ZSTD, SOUP2 VARCHAR(70) NULL ENCODE DELTA)"
+        )
+        self.validate_identity(
+            "SELECT CONVERT_TIMEZONE('America/Los_Angeles', col)"
+        )
+        self.validate_identity(
+            "SELECT CONVERT_TIMEZONE('UTC', 'America/Los_Angeles', col)"
         )
 
     def test_values(self):

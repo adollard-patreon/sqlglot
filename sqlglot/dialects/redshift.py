@@ -13,6 +13,19 @@ def _json_sql(self: Postgres.Generator, expression: exp.JSONExtract | exp.JSONEx
     return f'{self.sql(expression, "this")}."{expression.expression.name}"'
 
 
+def _parse_convert_timezone(args: t.List) -> exp.Expression:
+    if len(args) == 3:
+        return exp.ConvertTimeZone(
+            from_zone=seq_get(args, 0),
+            to_zone=seq_get(args, 1),
+            this=seq_get(args, 2),
+        )
+    return exp.ConvertTimeZone(
+        to_zone=seq_get(args, 0),
+        this=seq_get(args, 1),
+    )
+
+
 class Redshift(Postgres):
     # https://docs.aws.amazon.com/redshift/latest/dg/r_names.html
     RESOLVES_IDENTIFIERS_AS_UPPERCASE = None
@@ -27,6 +40,7 @@ class Redshift(Postgres):
     class Parser(Postgres.Parser):
         FUNCTIONS = {
             **Postgres.Parser.FUNCTIONS,
+            "CONVERT_TIMEZONE": _parse_convert_timezone,
             "DATEADD": lambda args: exp.DateAdd(
                 this=exp.TsOrDsToDate(this=seq_get(args, 2)),
                 expression=seq_get(args, 1),
@@ -162,6 +176,15 @@ class Redshift(Postgres):
                     subquery_expression = exp.union(subquery_expression, select, distinct=False)
 
             return self.subquery_sql(subquery_expression.subquery(expression.alias))
+
+        def converttimezone_sql(self, expression: exp.ConvertTimeZone) -> str:
+            from_zone = self.sql(expression, 'from_zone')
+            to_zone = self.sql(expression, 'to_zone')
+            this = self.sql(expression, 'this')
+            if from_zone:
+                return f"CONVERT_TIMEZONE({from_zone}, {to_zone}, {this})"
+            return f"CONVERT_TIMEZONE({to_zone}, {this})"
+
 
         def with_properties(self, properties: exp.Properties) -> str:
             """Redshift doesn't have `WITH` as part of their with_properties so we remove it"""

@@ -60,3 +60,11 @@ class Spark(Spark2):
                 return self.func("DATEDIFF", unit, start, end)
 
             return self.func("DATEDIFF", end, start)
+
+        def converttimezone_sql(self, expression: exp.ConvertTimeZone) -> str:
+            from_zone = self.sql(expression, 'from_zone')
+            to_zone = self.sql(expression, 'to_zone')
+            this = self.sql(expression, 'this')
+            if from_zone:
+                return f"FROM_UTC_TIMESTAMP(TO_UTC_TIMESTAMP({this}, {from_zone}), {to_zone})"
+            return f"FROM_UTC_TIMESTAMP({this}, {to_zone})"
