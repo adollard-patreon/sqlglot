@@ -15,13 +15,19 @@ def _json_sql(self: Postgres.Generator, expression: exp.JSONExtract | exp.JSONEx
 
 def _parse_convert_timezone(args: t.List) -> exp.Expression:
     if len(args) == 3:
+        if seq_get(args, 0) == "'UTC'":
+            return exp.AtTimeZone(
+                zone=seq_get(args, 1),
+                this=seq_get(args, 2),
+            )
+
         return exp.ConvertTimeZone(
             from_zone=seq_get(args, 0),
             to_zone=seq_get(args, 1),
             this=seq_get(args, 2),
         )
-    return exp.ConvertTimeZone(
-        to_zone=seq_get(args, 0),
+    return exp.AtTimeZone(
+        zone=seq_get(args, 0),
         this=seq_get(args, 1),
     )
 
