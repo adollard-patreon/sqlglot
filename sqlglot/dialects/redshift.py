@@ -35,6 +35,7 @@ def _parse_convert_timezone(args: t.List) -> exp.Expression:
     return exp.AtTimeZone(
         zone=seq_get(args, 0),
         this=seq_get(args, 1),
+    )
 
 
 def _parse_date_add(args: t.List) -> exp.DateAdd:
@@ -71,11 +72,6 @@ class Redshift(Postgres):
         FUNCTIONS = {
             **Postgres.Parser.FUNCTIONS,
             "CONVERT_TIMEZONE": _parse_convert_timezone,
-            "DATEADD": lambda args: exp.DateAdd(
-                this=exp.TsOrDsToDate(this=seq_get(args, 2)),
-                expression=seq_get(args, 1),
-                unit=exp.var("month"),
-            ),
             "ADD_MONTHS": lambda args: exp.DateAdd(
                 this=exp.TsOrDsToDate(this=seq_get(args, 0)),
                 expression=seq_get(args, 1),
