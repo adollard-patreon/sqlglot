@@ -1,15 +1,20 @@
 from __future__ import annotations
 
+import datetime
 import re
 import typing as t
 
 from sqlglot import exp, generator, parser, tokens, transforms
 from sqlglot.dialects.dialect import (
     Dialect,
+    any_value_to_max_sql,
+    generatedasidentitycolumnconstraint_sql,
     max_or_greatest,
     min_or_least,
     parse_date_delta,
     rename_func,
+    timestrtotime_sql,
+    ts_or_ds_to_date_sql,
 )
 from sqlglot.expressions import DataType
 from sqlglot.helper import seq_get
@@ -52,6 +57,10 @@ DATE_FMT_RE = re.compile("([dD]{1,2})|([mM]{1,2})|([yY]{1,4})|([hH]{1,2})|([sS]{
 # N = Numeric, C=Currency
 TRANSPILE_SAFE_NUMBER_FMT = {"N", "C"}
 
+DEFAULT_START_DATE = datetime.date(1900, 1, 1)
+
+BIT_TYPES = {exp.EQ, exp.NEQ, exp.Is, exp.In, exp.Select, exp.Alias}
+
 
 def _format_time_lambda(
     exp_class: t.Type[E], full_format_mapping: t.Optional[bool] = None
@@ -75,22 +84,23 @@ def _format_time_lambda(
 
 
 def _parse_format(args: t.List) -> exp.Expression:
-    assert len(args) == 2
+    this = seq_get(args, 0)
+    fmt = seq_get(args, 1)
+    culture = seq_get(args, 2)
 
-    fmt = args[1]
-    number_fmt = fmt.name in TRANSPILE_SAFE_NUMBER_FMT or not DATE_FMT_RE.search(fmt.name)
+    number_fmt = fmt and (fmt.name in TRANSPILE_SAFE_NUMBER_FMT or not DATE_FMT_RE.search(fmt.name))
 
     if number_fmt:
-        return exp.NumberToStr(this=args[0], format=fmt)
+        return exp.NumberToStr(this=this, format=fmt, culture=culture)
 
-    return exp.TimeToStr(
-        this=args[0],
-        format=exp.Literal.string(
+    if fmt:
+        fmt = exp.Literal.string(
             format_time(fmt.name, TSQL.FORMAT_TIME_MAPPING)
             if len(fmt.name) == 1
             else format_time(fmt.name, TSQL.TIME_MAPPING)
-        ),
-    )
+        )
+
+    return exp.TimeToStr(this=this, format=fmt, culture=culture)
 
 
 def _parse_eomonth(args: t.List) -> exp.Expression:
@@ -126,13 +136,13 @@ def _parse_hashbytes(args: t.List) -> exp.Expression:
 
 
 def generate_date_delta_with_unit_sql(
-    self: generator.Generator, expression: exp.DateAdd | exp.DateDiff
+    self: TSQL.Generator, expression: exp.DateAdd | exp.DateDiff
 ) -> str:
     func = "DATEADD" if isinstance(expression, exp.DateAdd) else "DATEDIFF"
     return self.func(func, expression.text("unit"), expression.expression, expression.this)
 
 
-def _format_sql(self: generator.Generator, expression: exp.NumberToStr | exp.TimeToStr) -> str:
+def _format_sql(self: TSQL.Generator, expression: exp.NumberToStr | exp.TimeToStr) -> str:
     fmt = (
         expression.args["format"]
         if isinstance(expression, exp.NumberToStr)
@@ -143,12 +153,10 @@ def _format_sql(self: generator.Generator, expression: exp.NumberToStr | exp.Tim
             )
         )
     )
-    return self.func("FORMAT", expression.this, fmt)
+    return self.func("FORMAT", expression.this, fmt, expression.args.get("culture"))
 
 
-def _string_agg_sql(self: generator.Generator, expression: exp.GroupConcat) -> str:
-    expression = expression.copy()
-
+def _string_agg_sql(self: TSQL.Generator, expression: exp.GroupConcat) -> str:
     this = expression.this
     distinct = expression.find(exp.Distinct)
     if distinct:
@@ -166,10 +174,74 @@ def _string_agg_sql(self: generator.Generator, expression: exp.GroupConcat) -> s
     return f"STRING_AGG({self.format_args(this, separator)}){order}"
 
 
+def _parse_date_delta(
+    exp_class: t.Type[E], unit_mapping: t.Optional[t.Dict[str, str]] = None
+) -> t.Callable[[t.List], E]:
+    def inner_func(args: t.List) -> E:
+        unit = seq_get(args, 0)
+        if unit and unit_mapping:
+            unit = exp.var(unit_mapping.get(unit.name.lower(), unit.name))
+
+        start_date = seq_get(args, 1)
+        if start_date and start_date.is_number:
+            # Numeric types are valid DATETIME values
+            if start_date.is_int:
+                adds = DEFAULT_START_DATE + datetime.timedelta(days=int(start_date.this))
+                start_date = exp.Literal.string(adds.strftime("%F"))
+            else:
+                # We currently don't handle float values, i.e. they're not converted to equivalent DATETIMEs.
+                # This is not a problem when generating T-SQL code, it is when transpiling to other dialects.
+                return exp_class(this=seq_get(args, 2), expression=start_date, unit=unit)
+
+        return exp_class(
+            this=exp.TimeStrToTime(this=seq_get(args, 2)),
+            expression=exp.TimeStrToTime(this=start_date),
+            unit=unit,
+        )
+
+    return inner_func
+
+
+def qualify_derived_table_outputs(expression: exp.Expression) -> exp.Expression:
+    """Ensures all (unnamed) output columns are aliased for CTEs and Subqueries."""
+    alias = expression.args.get("alias")
+
+    if (
+        isinstance(expression, (exp.CTE, exp.Subquery))
+        and isinstance(alias, exp.TableAlias)
+        and not alias.columns
+    ):
+        from sqlglot.optimizer.qualify_columns import qualify_outputs
+
+        # We keep track of the unaliased column projection indexes instead of the expressions
+        # themselves, because the latter are going to be replaced by new nodes when the aliases
+        # are added and hence we won't be able to reach these newly added Alias parents
+        subqueryable = expression.this
+        unaliased_column_indexes = (
+            i
+            for i, c in enumerate(subqueryable.selects)
+            if isinstance(c, exp.Column) and not c.alias
+        )
+
+        qualify_outputs(subqueryable)
+
+        # Preserve the quoting information of columns for newly added Alias nodes
+        subqueryable_selects = subqueryable.selects
+        for select_index in unaliased_column_indexes:
+            alias = subqueryable_selects[select_index]
+            column = alias.this
+            if isinstance(column.this, exp.Identifier):
+                alias.args["alias"].set("quoted", column.this.quoted)
+
+    return expression
+
+
 class TSQL(Dialect):
     RESOLVES_IDENTIFIERS_AS_UPPERCASE = None
-    NULL_ORDERING = "nulls_are_small"
     TIME_FORMAT = "'yyyy-mm-dd hh:mm:ss'"
+    SUPPORTS_SEMI_ANTI_JOIN = False
+    LOG_BASE_FIRST = False
+    TYPED_DIVISION = True
 
     TIME_MAPPING = {
         "year": "%Y",
@@ -205,6 +277,7 @@ class TSQL(Dialect):
         "MMM": "%b",
         "MM": "%m",
         "M": "%-m",
+        "dddd": "%A",
         "dd": "%d",
         "d": "%-d",
         "HH": "%H",
@@ -298,20 +371,19 @@ class TSQL(Dialect):
             "SMALLDATETIME": TokenType.DATETIME,
             "SMALLMONEY": TokenType.SMALLMONEY,
             "SQL_VARIANT": TokenType.VARIANT,
-            "TIME": TokenType.TIMESTAMP,
             "TOP": TokenType.TOP,
             "UNIQUEIDENTIFIER": TokenType.UNIQUEIDENTIFIER,
+            "UPDATE STATISTICS": TokenType.COMMAND,
             "VARCHAR(MAX)": TokenType.TEXT,
             "XML": TokenType.XML,
             "OUTPUT": TokenType.RETURNING,
             "SYSTEM_USER": TokenType.CURRENT_USER,
+            "FOR SYSTEM_TIME": TokenType.TIMESTAMP_SNAPSHOT,
         }
 
-        # TSQL allows @, # to appear as a variable/identifier prefix
-        SINGLE_TOKENS = tokens.Tokenizer.SINGLE_TOKENS.copy()
-        SINGLE_TOKENS.pop("#")
-
     class Parser(parser.Parser):
+        SET_REQUIRES_ASSIGNMENT_DELIMITER = False
+
         FUNCTIONS = {
             **parser.Parser.FUNCTIONS,
             "CHARINDEX": lambda args: exp.StrPosition(
@@ -320,7 +392,7 @@ class TSQL(Dialect):
                 position=seq_get(args, 2),
             ),
             "DATEADD": parse_date_delta(exp.DateAdd, unit_mapping=DATE_DELTA_INTERVAL),
-            "DATEDIFF": parse_date_delta(exp.DateDiff, unit_mapping=DATE_DELTA_INTERVAL),
+            "DATEDIFF": _parse_date_delta(exp.DateDiff, unit_mapping=DATE_DELTA_INTERVAL),
             "DATENAME": _format_time_lambda(exp.TimeToStr, full_format_mapping=True),
             "DATEPART": _format_time_lambda(exp.TimeToStr),
             "EOMONTH": _parse_eomonth,
@@ -363,10 +435,25 @@ class TSQL(Dialect):
             TokenType.END: lambda self: self._parse_command(),
         }
 
-        LOG_BASE_FIRST = False
         LOG_DEFAULTS_TO_LN = True
 
         CONCAT_NULL_OUTPUTS_STRING = True
+
+        ALTER_TABLE_ADD_COLUMN_KEYWORD = False
+
+        def _parse_projections(self) -> t.List[exp.Expression]:
+            """
+            T-SQL supports the syntax alias = expression in the SELECT's projection list,
+            so we transform all parsed Selects to convert their EQ projections into Aliases.
+
+            See: https://learn.microsoft.com/en-us/sql/t-sql/queries/select-clause-transact-sql?view=sql-server-ver16#syntax
+            """
+            return [
+                exp.alias_(projection.expression, projection.this.this, copy=False)
+                if isinstance(projection, exp.EQ) and isinstance(projection.this, exp.Column)
+                else projection
+                for projection in super()._parse_projections()
+            ]
 
         def _parse_commit_or_rollback(self) -> exp.Commit | exp.Rollback:
             """Applies to SQL Server and Azure SQL Database
@@ -380,7 +467,7 @@ class TSQL(Dialect):
             """
             rollback = self._prev.token_type == TokenType.ROLLBACK
 
-            self._match_texts({"TRAN", "TRANSACTION"})
+            self._match_texts(("TRAN", "TRANSACTION"))
             this = self._parse_id_var()
 
             if rollback:
@@ -417,50 +504,15 @@ class TSQL(Dialect):
 
             return self._parse_as_command(self._prev)
 
-        def _parse_system_time(self) -> t.Optional[exp.Expression]:
-            if not self._match_text_seq("FOR", "SYSTEM_TIME"):
-                return None
-
-            if self._match_text_seq("AS", "OF"):
-                system_time = self.expression(
-                    exp.SystemTime, this=self._parse_bitwise(), kind="AS OF"
-                )
-            elif self._match_set((TokenType.FROM, TokenType.BETWEEN)):
-                kind = self._prev.text
-                this = self._parse_bitwise()
-                self._match_texts(("TO", "AND"))
-                expression = self._parse_bitwise()
-                system_time = self.expression(
-                    exp.SystemTime, this=this, expression=expression, kind=kind
-                )
-            elif self._match_text_seq("CONTAINED", "IN"):
-                args = self._parse_wrapped_csv(self._parse_bitwise)
-                system_time = self.expression(
-                    exp.SystemTime,
-                    this=seq_get(args, 0),
-                    expression=seq_get(args, 1),
-                    kind="CONTAINED IN",
-                )
-            elif self._match(TokenType.ALL):
-                system_time = self.expression(exp.SystemTime, kind="ALL")
-            else:
-                system_time = None
-                self.raise_error("Unable to parse FOR SYSTEM_TIME clause")
-
-            return system_time
-
-        def _parse_table_parts(self, schema: bool = False) -> exp.Table:
-            table = super()._parse_table_parts(schema=schema)
-            table.set("system_time", self._parse_system_time())
-            return table
-
         def _parse_returns(self) -> exp.ReturnsProperty:
             table = self._parse_id_var(any_token=False, tokens=self.RETURNS_TABLE_TOKENS)
             returns = super()._parse_returns()
             returns.set("table", table)
             return returns
 
-        def _parse_convert(self, strict: bool) -> t.Optional[exp.Expression]:
+        def _parse_convert(
+            self, strict: bool, safe: t.Optional[bool] = None
+        ) -> t.Optional[exp.Expression]:
             to = self._parse_types()
             self._match(TokenType.COMMA)
             this = self._parse_conjunction()
@@ -496,12 +548,13 @@ class TSQL(Dialect):
                         exp.Cast if strict else exp.TryCast,
                         to=to,
                         this=self.expression(exp.TimeToStr, this=this, format=format_norm),
+                        safe=safe,
                     )
                 elif to.this == DataType.Type.TEXT:
                     return self.expression(exp.TimeToStr, this=this, format=format_norm)
 
             # Entails a simple cast without any format requirement
-            return self.expression(exp.Cast if strict else exp.TryCast, this=this, to=to)
+            return self.expression(exp.Cast if strict else exp.TryCast, this=this, to=to, safe=safe)
 
         def _parse_user_defined_function(
             self, kind: t.Optional[TokenType] = None
@@ -518,41 +571,126 @@ class TSQL(Dialect):
             expressions = self._parse_csv(self._parse_function_parameter)
             return self.expression(exp.UserDefinedFunction, this=this, expressions=expressions)
 
+        def _parse_id_var(
+            self,
+            any_token: bool = True,
+            tokens: t.Optional[t.Collection[TokenType]] = None,
+        ) -> t.Optional[exp.Expression]:
+            is_temporary = self._match(TokenType.HASH)
+            is_global = is_temporary and self._match(TokenType.HASH)
+
+            this = super()._parse_id_var(any_token=any_token, tokens=tokens)
+            if this:
+                if is_global:
+                    this.set("global", True)
+                elif is_temporary:
+                    this.set("temporary", True)
+
+            return this
+
+        def _parse_create(self) -> exp.Create | exp.Command:
+            create = super()._parse_create()
+
+            if isinstance(create, exp.Create):
+                table = create.this.this if isinstance(create.this, exp.Schema) else create.this
+                if isinstance(table, exp.Table) and table.this.args.get("temporary"):
+                    if not create.args.get("properties"):
+                        create.set("properties", exp.Properties(expressions=[]))
+
+                    create.args["properties"].append("expressions", exp.TemporaryProperty())
+
+            return create
+
+        def _parse_if(self) -> t.Optional[exp.Expression]:
+            index = self._index
+
+            if self._match_text_seq("OBJECT_ID"):
+                self._parse_wrapped_csv(self._parse_string)
+                if self._match_text_seq("IS", "NOT", "NULL") and self._match(TokenType.DROP):
+                    return self._parse_drop(exists=True)
+                self._retreat(index)
+
+            return super()._parse_if()
+
+        def _parse_unique(self) -> exp.UniqueColumnConstraint:
+            if self._match_texts(("CLUSTERED", "NONCLUSTERED")):
+                this = self.CONSTRAINT_PARSERS[self._prev.text.upper()](self)
+            else:
+                this = self._parse_schema(self._parse_id_var(any_token=False))
+
+            return self.expression(exp.UniqueColumnConstraint, this=this)
+
     class Generator(generator.Generator):
-        LOCKING_READS_SUPPORTED = True
         LIMIT_IS_TOP = True
         QUERY_HINTS = False
         RETURNING_END = False
+        NVL2_SUPPORTED = False
+        ALTER_TABLE_ADD_COLUMN_KEYWORD = False
+        LIMIT_FETCH = "FETCH"
+        COMPUTED_COLUMN_WITH_TYPE = False
+        CTE_RECURSIVE_KEYWORD_REQUIRED = False
+        ENSURE_BOOLS = True
+        NULL_ORDERING_SUPPORTED = False
+
+        EXPRESSIONS_WITHOUT_NESTED_CTES = {
+            exp.Delete,
+            exp.Insert,
+            exp.Merge,
+            exp.Select,
+            exp.Subquery,
+            exp.Union,
+            exp.Update,
+        }
 
         TYPE_MAPPING = {
             **generator.Generator.TYPE_MAPPING,
-            exp.DataType.Type.INT: "INTEGER",
+            exp.DataType.Type.BOOLEAN: "BIT",
             exp.DataType.Type.DECIMAL: "NUMERIC",
             exp.DataType.Type.DATETIME: "DATETIME2",
+            exp.DataType.Type.DOUBLE: "FLOAT",
+            exp.DataType.Type.INT: "INTEGER",
+            exp.DataType.Type.TEXT: "VARCHAR(MAX)",
+            exp.DataType.Type.TIMESTAMP: "DATETIME2",
+            exp.DataType.Type.TIMESTAMPTZ: "DATETIMEOFFSET",
             exp.DataType.Type.VARIANT: "SQL_VARIANT",
         }
 
         TRANSFORMS = {
             **generator.Generator.TRANSFORMS,
+            exp.AnyValue: any_value_to_max_sql,
+            exp.AutoIncrementColumnConstraint: lambda *_: "IDENTITY",
             exp.DateAdd: generate_date_delta_with_unit_sql,
             exp.DateDiff: generate_date_delta_with_unit_sql,
+            exp.CTE: transforms.preprocess([qualify_derived_table_outputs]),
             exp.CurrentDate: rename_func("GETDATE"),
             exp.CurrentTimestamp: rename_func("GETDATE"),
             exp.Extract: rename_func("DATEPART"),
+            exp.GeneratedAsIdentityColumnConstraint: generatedasidentitycolumnconstraint_sql,
             exp.GroupConcat: _string_agg_sql,
             exp.If: rename_func("IIF"),
+            exp.Length: rename_func("LEN"),
             exp.Max: max_or_greatest,
             exp.MD5: lambda self, e: self.func("HASHBYTES", exp.Literal.string("MD5"), e.this),
             exp.Min: min_or_least,
             exp.NumberToStr: _format_sql,
-            exp.Select: transforms.preprocess([transforms.eliminate_distinct_on]),
+            exp.Select: transforms.preprocess(
+                [
+                    transforms.eliminate_distinct_on,
+                    transforms.eliminate_semi_and_anti_joins,
+                    transforms.eliminate_qualify,
+                ]
+            ),
+            exp.Subquery: transforms.preprocess([qualify_derived_table_outputs]),
             exp.SHA: lambda self, e: self.func("HASHBYTES", exp.Literal.string("SHA1"), e.this),
             exp.SHA2: lambda self, e: self.func(
                 "HASHBYTES",
                 exp.Literal.string(f"SHA2_{e.args.get('length', 256)}"),
                 e.this,
             ),
+            exp.TemporaryProperty: lambda self, e: "",
+            exp.TimeStrToTime: timestrtotime_sql,
             exp.TimeToStr: _format_sql,
+            exp.TsOrDsToDate: ts_or_ds_to_date_sql("tsql"),
         }
 
         TRANSFORMS.pop(exp.ReturnsProperty)
@@ -562,27 +700,98 @@ class TSQL(Dialect):
             exp.VolatileProperty: exp.Properties.Location.UNSUPPORTED,
         }
 
-        LIMIT_FETCH = "FETCH"
+        def setitem_sql(self, expression: exp.SetItem) -> str:
+            this = expression.this
+            if isinstance(this, exp.EQ) and not isinstance(this.left, exp.Parameter):
+                # T-SQL does not use '=' in SET command, except when the LHS is a variable.
+                return f"{self.sql(this.left)} {self.sql(this.right)}"
+
+            return super().setitem_sql(expression)
+
+        def boolean_sql(self, expression: exp.Boolean) -> str:
+            if type(expression.parent) in BIT_TYPES:
+                return "1" if expression.this else "0"
+
+            return "(1 = 1)" if expression.this else "(1 = 0)"
+
+        def is_sql(self, expression: exp.Is) -> str:
+            if isinstance(expression.expression, exp.Boolean):
+                return self.binary(expression, "=")
+            return self.binary(expression, "IS")
+
+        def createable_sql(self, expression: exp.Create, locations: t.DefaultDict) -> str:
+            sql = self.sql(expression, "this")
+            properties = expression.args.get("properties")
+
+            if sql[:1] != "#" and any(
+                isinstance(prop, exp.TemporaryProperty)
+                for prop in (properties.expressions if properties else [])
+            ):
+                sql = f"#{sql}"
+
+            return sql
+
+        def create_sql(self, expression: exp.Create) -> str:
+            kind = self.sql(expression, "kind").upper()
+            exists = expression.args.pop("exists", None)
+            sql = super().create_sql(expression)
+
+            table = expression.find(exp.Table)
+
+            # Convert CTAS statement to SELECT .. INTO ..
+            if kind == "TABLE" and expression.expression:
+                ctas_with = expression.expression.args.get("with")
+                if ctas_with:
+                    ctas_with = ctas_with.pop()
+
+                subquery = expression.expression
+                if isinstance(subquery, exp.Subqueryable):
+                    subquery = subquery.subquery()
+
+                select_into = exp.select("*").from_(exp.alias_(subquery, "temp", table=True))
+                select_into.set("into", exp.Into(this=table))
+                select_into.set("with", ctas_with)
+
+                sql = self.sql(select_into)
+
+            if exists:
+                identifier = self.sql(exp.Literal.string(exp.table_name(table) if table else ""))
+                sql = self.sql(exp.Literal.string(sql))
+                if kind == "SCHEMA":
+                    sql = f"""IF NOT EXISTS (SELECT * FROM information_schema.schemata WHERE schema_name = {identifier}) EXEC({sql})"""
+                elif kind == "TABLE":
+                    assert table
+                    where = exp.and_(
+                        exp.column("table_name").eq(table.name),
+                        exp.column("table_schema").eq(table.db) if table.db else None,
+                        exp.column("table_catalog").eq(table.catalog) if table.catalog else None,
+                    )
+                    sql = f"""IF NOT EXISTS (SELECT * FROM information_schema.tables WHERE {where}) EXEC({sql})"""
+                elif kind == "INDEX":
+                    index = self.sql(exp.Literal.string(expression.this.text("this")))
+                    sql = f"""IF NOT EXISTS (SELECT * FROM sys.indexes WHERE object_id = object_id({identifier}) AND name = {index}) EXEC({sql})"""
+            elif expression.args.get("replace"):
+                sql = sql.replace("CREATE OR REPLACE ", "CREATE OR ALTER ", 1)
+
+            return self.prepend_ctes(expression, sql)
 
         def offset_sql(self, expression: exp.Offset) -> str:
             return f"{super().offset_sql(expression)} ROWS"
 
-        def systemtime_sql(self, expression: exp.SystemTime) -> str:
-            kind = expression.args["kind"]
-            if kind == "ALL":
-                return "FOR SYSTEM_TIME ALL"
+        def version_sql(self, expression: exp.Version) -> str:
+            name = "SYSTEM_TIME" if expression.name == "TIMESTAMP" else expression.name
+            this = f"FOR {name}"
+            expr = expression.expression
+            kind = expression.text("kind")
+            if kind in ("FROM", "BETWEEN"):
+                args = expr.expressions
+                sep = "TO" if kind == "FROM" else "AND"
+                expr_sql = f"{self.sql(seq_get(args, 0))} {sep} {self.sql(seq_get(args, 1))}"
+            else:
+                expr_sql = self.sql(expr)
 
-            start = self.sql(expression, "this")
-            if kind == "AS OF":
-                return f"FOR SYSTEM_TIME AS OF {start}"
-
-            end = self.sql(expression, "expression")
-            if kind == "FROM":
-                return f"FOR SYSTEM_TIME FROM {start} TO {end}"
-            if kind == "BETWEEN":
-                return f"FOR SYSTEM_TIME BETWEEN {start} AND {end}"
-
-            return f"FOR SYSTEM_TIME CONTAINED IN ({start}, {end})"
+            expr_sql = f" {expr_sql}" if expr_sql else ""
+            return f"{this} {kind}{expr_sql}"
 
         def returnsproperty_sql(self, expression: exp.ReturnsProperty) -> str:
             table = expression.args.get("table")
@@ -616,3 +825,18 @@ class TSQL(Dialect):
             this = self.sql(expression, "this")
             this = f" {this}" if this else ""
             return f"ROLLBACK TRANSACTION{this}"
+
+        def identifier_sql(self, expression: exp.Identifier) -> str:
+            identifier = super().identifier_sql(expression)
+
+            if expression.args.get("global"):
+                identifier = f"##{identifier}"
+            elif expression.args.get("temporary"):
+                identifier = f"#{identifier}"
+
+            return identifier
+
+        def constraint_sql(self, expression: exp.Constraint) -> str:
+            this = self.sql(expression, "this")
+            expressions = self.expressions(expression, flat=True, sep=" ")
+            return f"CONSTRAINT {this} {expressions}"

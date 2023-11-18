@@ -2,7 +2,7 @@ import datetime
 import math
 import unittest
 
-from sqlglot import alias, exp, parse_one
+from sqlglot import ParseError, alias, exp, parse_one
 
 
 class TestExpressions(unittest.TestCase):
@@ -13,6 +13,13 @@ class TestExpressions(unittest.TestCase):
 
     def test_depth(self):
         self.assertEqual(parse_one("x(1)").find(exp.Literal).depth, 1)
+
+    def test_iter(self):
+        self.assertEqual([exp.Literal.number(1), exp.Literal.number(2)], list(parse_one("[1, 2]")))
+
+        with self.assertRaises(TypeError):
+            for x in parse_one("1"):
+                pass
 
     def test_eq(self):
         self.assertNotEqual(exp.to_identifier("a"), exp.to_identifier("A"))
@@ -175,19 +182,25 @@ class TestExpressions(unittest.TestCase):
         self.assertEqual(parse_one("a.b.c").name, "c")
 
     def test_table_name(self):
+        bq_dashed_table = exp.to_table("a-1.b.c", dialect="bigquery")
+        self.assertEqual(exp.table_name(bq_dashed_table), '"a-1".b.c')
+        self.assertEqual(exp.table_name(bq_dashed_table, dialect="bigquery"), "`a-1`.b.c")
+        self.assertEqual(exp.table_name("a-1.b.c", dialect="bigquery"), "`a-1`.b.c")
         self.assertEqual(exp.table_name(parse_one("a", into=exp.Table)), "a")
         self.assertEqual(exp.table_name(parse_one("a.b", into=exp.Table)), "a.b")
         self.assertEqual(exp.table_name(parse_one("a.b.c", into=exp.Table)), "a.b.c")
         self.assertEqual(exp.table_name("a.b.c"), "a.b.c")
+        self.assertEqual(exp.table_name(exp.to_table("a.b.c.d.e", dialect="bigquery")), "a.b.c.d.e")
+        self.assertEqual(exp.table_name(exp.to_table("'@foo'", dialect="snowflake")), "'@foo'")
+        self.assertEqual(exp.table_name(exp.to_table("@foo", dialect="snowflake")), "@foo")
         self.assertEqual(
             exp.table_name(parse_one("foo.`{bar,er}`", read="databricks"), dialect="databricks"),
             "foo.`{bar,er}`",
         )
-        self.assertEqual(exp.table_name(exp.to_table("a-1.b.c", dialect="bigquery")), '"a-1".b.c')
-        self.assertEqual(exp.table_name(exp.to_table("a.b.c.d.e", dialect="bigquery")), "a.b.c.d.e")
 
     def test_table(self):
         self.assertEqual(exp.table_("a", alias="b"), parse_one("select * from a b").find(exp.Table))
+        self.assertEqual(exp.table_("a", "").sql(), "a")
 
     def test_replace_tables(self):
         self.assertEqual(
@@ -328,6 +341,10 @@ class TestExpressions(unittest.TestCase):
         cte = expression.find(exp.CTE)
         self.assertEqual(cte.alias_column_names, ["a", "b"])
 
+        expression = parse_one("SELECT * FROM tbl AS tbl(a, b)")
+        table = expression.find(exp.Table)
+        self.assertEqual(table.alias_column_names, ["a", "b"])
+
     def test_ctes(self):
         expression = parse_one("SELECT a FROM x")
         self.assertEqual(expression.ctes, [])
@@ -426,7 +443,7 @@ class TestExpressions(unittest.TestCase):
                 return None
             return node
 
-        self.assertEqual(expression.transform(remove_non_list_arg).sql(), "CAST(x AS )")
+        self.assertEqual(expression.transform(remove_non_list_arg).sql(), "CAST(x AS)")
 
         expression = parse_one("SELECT a, b FROM x")
 
@@ -556,6 +573,7 @@ class TestExpressions(unittest.TestCase):
         self.assertIsInstance(parse_one("HEX(foo)"), exp.Hex)
         self.assertIsInstance(parse_one("TO_HEX(foo)", read="bigquery"), exp.Hex)
         self.assertIsInstance(parse_one("TO_HEX(MD5(foo))", read="bigquery"), exp.MD5)
+        self.assertIsInstance(parse_one("TRANSFORM(a, b)", read="spark"), exp.Transform)
 
     def test_column(self):
         column = parse_one("a.b.c.d")
@@ -614,6 +632,11 @@ class TestExpressions(unittest.TestCase):
         week = unit.find(exp.Week)
         self.assertEqual(week.this, exp.var("thursday"))
 
+        for abbreviated_unit, unnabreviated_unit in exp.TimeUnit.UNABBREVIATED_UNIT_NAME.items():
+            interval = parse_one(f"interval '500 {abbreviated_unit}'")
+            self.assertIsInstance(interval.unit, exp.Var)
+            self.assertEqual(interval.unit.name, unnabreviated_unit)
+
     def test_identifier(self):
         self.assertTrue(exp.to_identifier('"x"').quoted)
         self.assertFalse(exp.to_identifier("x").quoted)
@@ -661,7 +684,7 @@ class TestExpressions(unittest.TestCase):
             (True, "TRUE"),
             ((1, "2", None), "(1, '2', NULL)"),
             ([1, "2", None], "ARRAY(1, '2', NULL)"),
-            ({"x": None}, "MAP('x', NULL)"),
+            ({"x": None}, "MAP(ARRAY('x'), ARRAY(NULL))"),
             (
                 datetime.datetime(2022, 10, 1, 1, 1, 1, 1),
                 "TIME_STR_TO_TIME('2022-10-01T01:01:01.000001+00:00')",
@@ -675,6 +698,11 @@ class TestExpressions(unittest.TestCase):
         ]:
             with self.subTest(value):
                 self.assertEqual(exp.convert(value).sql(), expected)
+
+        self.assertEqual(
+            exp.convert({"test": "value"}).sql(dialect="spark"),
+            "MAP_FROM_ARRAYS(ARRAY('test'), ARRAY('value'))",
+        )
 
     def test_comment_alias(self):
         sql = """
@@ -836,6 +864,13 @@ FROM foo""",
         )
         self.assertEqual(exp.DataType.build("USER-DEFINED").sql(), "USER-DEFINED")
 
+        self.assertEqual(exp.DataType.build("ARRAY<UNKNOWN>").sql(), "ARRAY<UNKNOWN>")
+        self.assertEqual(exp.DataType.build("ARRAY<NULL>").sql(), "ARRAY<NULL>")
+        self.assertEqual(exp.DataType.build("varchar(100) collate 'en-ci'").sql(), "VARCHAR(100)")
+
+        with self.assertRaises(ParseError):
+            exp.DataType.build("varchar(")
+
     def test_rename_table(self):
         self.assertEqual(
             exp.rename_table("t1", "t2").sql(),
@@ -874,3 +909,59 @@ FROM foo""",
 
         ast.meta["some_other_meta_key"] = "some_other_meta_value"
         self.assertEqual(ast.meta.get("some_other_meta_key"), "some_other_meta_value")
+
+    def test_unnest(self):
+        ast = parse_one("SELECT (((1)))")
+        self.assertIs(ast.selects[0].unnest(), ast.find(exp.Literal))
+
+        ast = parse_one("SELECT * FROM (((SELECT * FROM t)))")
+        self.assertIs(ast.args["from"].this.unnest(), list(ast.find_all(exp.Select))[1])
+
+        ast = parse_one("SELECT * FROM ((((SELECT * FROM t))) AS foo)")
+        second_subquery = ast.args["from"].this.this
+        innermost_subquery = list(ast.find_all(exp.Select))[1].parent
+        self.assertIs(second_subquery, innermost_subquery.unwrap())
+
+    def test_is_type(self):
+        ast = parse_one("CAST(x AS VARCHAR)")
+        assert ast.is_type("VARCHAR")
+        assert not ast.is_type("VARCHAR(5)")
+        assert not ast.is_type("FLOAT")
+
+        ast = parse_one("CAST(x AS VARCHAR(5))")
+        assert ast.is_type("VARCHAR")
+        assert ast.is_type("VARCHAR(5)")
+        assert not ast.is_type("VARCHAR(4)")
+        assert not ast.is_type("FLOAT")
+
+        ast = parse_one("CAST(x AS ARRAY<INT>)")
+        assert ast.is_type("ARRAY")
+        assert ast.is_type("ARRAY<INT>")
+        assert not ast.is_type("ARRAY<FLOAT>")
+        assert not ast.is_type("INT")
+
+        ast = parse_one("CAST(x AS ARRAY)")
+        assert ast.is_type("ARRAY")
+        assert not ast.is_type("ARRAY<INT>")
+        assert not ast.is_type("ARRAY<FLOAT>")
+        assert not ast.is_type("INT")
+
+        ast = parse_one("CAST(x AS STRUCT<a INT, b FLOAT>)")
+        assert ast.is_type("STRUCT")
+        assert ast.is_type("STRUCT<a INT, b FLOAT>")
+        assert not ast.is_type("STRUCT<a VARCHAR, b INT>")
+
+        dtype = exp.DataType.build("foo", udt=True)
+        assert dtype.is_type("foo")
+        assert not dtype.is_type("bar")
+
+        dtype = exp.DataType.build("a.b.c", udt=True)
+        assert dtype.is_type("a.b.c")
+
+        with self.assertRaises(ParseError):
+            exp.DataType.build("foo")
+
+    def test_set_meta(self):
+        query = parse_one("SELECT * FROM foo /* sqlglot.meta x = 1, y = a, z */")
+        self.assertEqual(query.find(exp.Table).meta, {"x": "1", "y": "a", "z": True})
+        self.assertEqual(query.sql(), "SELECT * FROM foo /* sqlglot.meta x = 1, y = a, z */")

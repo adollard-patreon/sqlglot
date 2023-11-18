@@ -6,9 +6,41 @@ class TestMySQL(Validator):
     dialect = "mysql"
 
     def test_ddl(self):
+        int_types = {"BIGINT", "INT", "MEDIUMINT", "SMALLINT", "TINYINT"}
+
+        for t in int_types:
+            self.validate_identity(f"CREATE TABLE t (id {t} UNSIGNED)")
+            self.validate_identity(f"CREATE TABLE t (id {t}(10) UNSIGNED)")
+
+        self.validate_identity("CREATE TABLE t (id DECIMAL(20, 4) UNSIGNED)")
+
+        self.validate_all(
+            "CREATE TABLE t (id INT UNSIGNED)",
+            write={
+                "duckdb": "CREATE TABLE t (id UINTEGER)",
+            },
+        )
+
+        self.validate_identity("CREATE TABLE foo (a BIGINT, UNIQUE (b) USING BTREE)")
         self.validate_identity("CREATE TABLE foo (id BIGINT)")
+        self.validate_identity("CREATE TABLE 00f (1d BIGINT)")
         self.validate_identity("UPDATE items SET items.price = 0 WHERE items.id >= 5 LIMIT 10")
         self.validate_identity("DELETE FROM t WHERE a <= 10 LIMIT 10")
+        self.validate_identity("CREATE TABLE foo (a BIGINT, INDEX USING BTREE (b))")
+        self.validate_identity("CREATE TABLE foo (a BIGINT, FULLTEXT INDEX (b))")
+        self.validate_identity("CREATE TABLE foo (a BIGINT, SPATIAL INDEX (b))")
+        self.validate_identity(
+            "CREATE TABLE `oauth_consumer` (`key` VARCHAR(32) NOT NULL, UNIQUE `OAUTH_CONSUMER_KEY` (`key`))"
+        )
+        self.validate_identity(
+            "CREATE TABLE `x` (`username` VARCHAR(200), PRIMARY KEY (`username`(16)))"
+        )
+        self.validate_identity(
+            "UPDATE items SET items.price = 0 WHERE items.id >= 5 ORDER BY items.id LIMIT 10"
+        )
+        self.validate_identity(
+            "CREATE TABLE foo (a BIGINT, INDEX b USING HASH (c) COMMENT 'd' VISIBLE ENGINE_ATTRIBUTE = 'e' WITH PARSER foo)"
+        )
         self.validate_identity(
             "DELETE t1 FROM t1 LEFT JOIN t2 ON t1.id = t2.id WHERE t2.id IS NULL"
         )
@@ -32,6 +64,9 @@ class TestMySQL(Validator):
         )
         self.validate_identity(
             "INSERT INTO x VALUES (1, 'a', 2.0) ON DUPLICATE KEY UPDATE x.id = 1"
+        )
+        self.validate_identity(
+            "CREATE OR REPLACE VIEW my_view AS SELECT column1 AS `boo`, column2 AS `foo` FROM my_table WHERE column3 = 'some_value' UNION SELECT q.* FROM fruits_table, JSON_TABLE(Fruits, '$[*]' COLUMNS(id VARCHAR(255) PATH '$.$id', value VARCHAR(255) PATH '$.value')) AS q",
         )
 
         self.validate_all(
@@ -67,8 +102,29 @@ class TestMySQL(Validator):
                 "mysql": "CREATE TABLE `foo` (`id` CHAR(36) NOT NULL DEFAULT (UUID()), PRIMARY KEY (`id`), UNIQUE `id` (`id`))",
             },
         )
+        self.validate_all(
+            "CREATE TABLE IF NOT EXISTS industry_info (a BIGINT(20) NOT NULL AUTO_INCREMENT, b BIGINT(20) NOT NULL, c VARCHAR(1000), PRIMARY KEY (a), UNIQUE KEY d (b), KEY e (b))",
+            write={
+                "mysql": "CREATE TABLE IF NOT EXISTS industry_info (a BIGINT(20) NOT NULL AUTO_INCREMENT, b BIGINT(20) NOT NULL, c VARCHAR(1000), PRIMARY KEY (a), UNIQUE d (b), INDEX e (b))",
+            },
+        )
+        self.validate_all(
+            "CREATE TABLE test (ts TIMESTAMP, ts_tz TIMESTAMPTZ, ts_ltz TIMESTAMPLTZ)",
+            write={
+                "mysql": "CREATE TABLE test (ts DATETIME, ts_tz TIMESTAMP, ts_ltz TIMESTAMP)",
+            },
+        )
+        self.validate_all(
+            "ALTER TABLE test_table ALTER COLUMN test_column SET DATA TYPE LONGTEXT",
+            write={
+                "mysql": "ALTER TABLE test_table MODIFY COLUMN test_column LONGTEXT",
+            },
+        )
+        self.validate_identity("ALTER TABLE test_table ALTER COLUMN test_column SET DEFAULT 1")
 
     def test_identity(self):
+        self.validate_identity("UNLOCK TABLES")
+        self.validate_identity("LOCK TABLES `app_fields` WRITE")
         self.validate_identity("SELECT 1 XOR 0")
         self.validate_identity("SELECT 1 && 0", "SELECT 1 AND 0")
         self.validate_identity("SELECT /*+ BKA(t1) NO_BKA(t2) */ * FROM t1 INNER JOIN t2")
@@ -83,7 +139,7 @@ class TestMySQL(Validator):
         self.validate_identity("CAST(x AS SET('a', 'b'))")
         self.validate_identity("SELECT CURRENT_TIMESTAMP(6)")
         self.validate_identity("x ->> '$.name'")
-        self.validate_identity("SELECT CAST(`a`.`b` AS INT) FROM foo")
+        self.validate_identity("SELECT CAST(`a`.`b` AS CHAR) FROM foo")
         self.validate_identity("SELECT TRIM(LEADING 'bla' FROM ' XXX ')")
         self.validate_identity("SELECT TRIM(TRAILING 'bla' FROM ' XXX ')")
         self.validate_identity("SELECT TRIM(BOTH 'bla' FROM ' XXX ')")
@@ -91,6 +147,10 @@ class TestMySQL(Validator):
         self.validate_identity("@@GLOBAL.max_connections")
         self.validate_identity("CREATE TABLE A LIKE B")
         self.validate_identity("SELECT * FROM t1, t2 FOR SHARE OF t1, t2 SKIP LOCKED")
+        self.validate_identity("SELECT a || b", "SELECT a OR b")
+        self.validate_identity(
+            "SELECT * FROM x ORDER BY BINARY a", "SELECT * FROM x ORDER BY CAST(a AS BINARY)"
+        )
         self.validate_identity(
             """SELECT * FROM foo WHERE 3 MEMBER OF(JSON_EXTRACT(info, '$.value'))"""
         )
@@ -158,26 +218,36 @@ class TestMySQL(Validator):
         self.validate_identity(
             "SET @@GLOBAL.sort_buffer_size = 1000000, @@LOCAL.sort_buffer_size = 1000000"
         )
+        self.validate_identity("INTERVAL '1' YEAR")
+        self.validate_identity("DATE_ADD(x, INTERVAL 1 YEAR)")
+        self.validate_identity("CHAR(0)")
+        self.validate_identity("CHAR(77, 121, 83, 81, '76')")
+        self.validate_identity("CHAR(77, 77.3, '77.3' USING utf8mb4)")
 
     def test_types(self):
+        self.validate_identity("CAST(x AS MEDIUMINT) + CAST(y AS YEAR(4))")
+
         self.validate_all(
-            "CAST(x AS MEDIUMTEXT) + CAST(y AS LONGTEXT)",
+            "CAST(x AS MEDIUMTEXT) + CAST(y AS LONGTEXT) + CAST(z AS TINYTEXT)",
             read={
-                "mysql": "CAST(x AS MEDIUMTEXT) + CAST(y AS LONGTEXT)",
+                "mysql": "CAST(x AS MEDIUMTEXT) + CAST(y AS LONGTEXT) + CAST(z AS TINYTEXT)",
             },
             write={
-                "spark": "CAST(x AS TEXT) + CAST(y AS TEXT)",
+                "spark": "CAST(x AS TEXT) + CAST(y AS TEXT) + CAST(z AS TEXT)",
             },
         )
         self.validate_all(
-            "CAST(x AS MEDIUMBLOB) + CAST(y AS LONGBLOB)",
+            "CAST(x AS MEDIUMBLOB) + CAST(y AS LONGBLOB) + CAST(z AS TINYBLOB)",
             read={
-                "mysql": "CAST(x AS MEDIUMBLOB) + CAST(y AS LONGBLOB)",
+                "mysql": "CAST(x AS MEDIUMBLOB) + CAST(y AS LONGBLOB) + CAST(z AS TINYBLOB)",
             },
             write={
-                "spark": "CAST(x AS BLOB) + CAST(y AS BLOB)",
+                "spark": "CAST(x AS BLOB) + CAST(y AS BLOB) + CAST(z AS BLOB)",
             },
         )
+        self.validate_all("CAST(x AS TIMESTAMP)", write={"mysql": "CAST(x AS DATETIME)"})
+        self.validate_all("CAST(x AS TIMESTAMPTZ)", write={"mysql": "TIMESTAMP(x)"})
+        self.validate_all("CAST(x AS TIMESTAMPLTZ)", write={"mysql": "TIMESTAMP(x)"})
 
     def test_canonical_functions(self):
         self.validate_identity("SELECT LEFT('str', 2)", "SELECT LEFT('str', 2)")
@@ -192,8 +262,24 @@ class TestMySQL(Validator):
         self.validate_identity(
             "SELECT WEEK_OF_YEAR('2023-01-01')", "SELECT WEEKOFYEAR('2023-01-01')"
         )
+        self.validate_all(
+            "CHAR(10)",
+            write={
+                "mysql": "CHAR(10)",
+                "presto": "CHR(10)",
+            },
+        )
 
     def test_escape(self):
+        self.validate_identity("""'"abc"'""")
+        self.validate_identity(
+            r"'\'a'",
+            "'''a'",
+        )
+        self.validate_identity(
+            '''"'abc'"''',
+            "'''abc'''",
+        )
         self.validate_all(
             r"'a \' b '' '",
             write={
@@ -340,6 +426,7 @@ class TestMySQL(Validator):
             write={
                 "": "MATCH(col1, col2, col3) AGAINST('abc')",
                 "mysql": "MATCH(col1, col2, col3) AGAINST('abc')",
+                "postgres": "(col1 @@ 'abc' OR col2 @@ 'abc' OR col3 @@ 'abc')",  # not quite correct because it's not ts_query
             },
         )
         self.validate_all(
@@ -434,12 +521,111 @@ class TestMySQL(Validator):
         self.validate_identity("FROM_UNIXTIME(a, b)")
         self.validate_identity("FROM_UNIXTIME(a, b, c)")
         self.validate_identity("TIME_STR_TO_UNIX(x)", "UNIX_TIMESTAMP(x)")
+        self.validate_all(
+            "SELECT TO_DAYS(x)",
+            write={
+                "mysql": "SELECT (DATEDIFF(x, '0000-01-01') + 1)",
+                "presto": "SELECT (DATE_DIFF('DAY', CAST(CAST('0000-01-01' AS TIMESTAMP) AS DATE), CAST(CAST(x AS TIMESTAMP) AS DATE)) + 1)",
+            },
+        )
+        self.validate_all(
+            "SELECT DATEDIFF(x, y)",
+            write={"mysql": "SELECT DATEDIFF(x, y)", "presto": "SELECT DATE_DIFF('day', y, x)"},
+        )
+        self.validate_all(
+            "DAYOFYEAR(x)",
+            write={
+                "mysql": "DAYOFYEAR(x)",
+                "": "DAY_OF_YEAR(TS_OR_DS_TO_DATE(x))",
+            },
+        )
+        self.validate_all(
+            "DAYOFMONTH(x)",
+            write={"mysql": "DAYOFMONTH(x)", "": "DAY_OF_MONTH(TS_OR_DS_TO_DATE(x))"},
+        )
+        self.validate_all(
+            "DAYOFWEEK(x)",
+            write={"mysql": "DAYOFWEEK(x)", "": "DAY_OF_WEEK(TS_OR_DS_TO_DATE(x))"},
+        )
+        self.validate_all(
+            "WEEKOFYEAR(x)",
+            write={"mysql": "WEEKOFYEAR(x)", "": "WEEK_OF_YEAR(TS_OR_DS_TO_DATE(x))"},
+        )
+        self.validate_all(
+            "DAY(x)",
+            write={"mysql": "DAY(x)", "": "DAY(TS_OR_DS_TO_DATE(x))"},
+        )
+        self.validate_all(
+            "WEEK(x)",
+            write={"mysql": "WEEK(x)", "": "WEEK(TS_OR_DS_TO_DATE(x))"},
+        )
+        self.validate_all(
+            "YEAR(x)",
+            write={"mysql": "YEAR(x)", "": "YEAR(TS_OR_DS_TO_DATE(x))"},
+        )
+        self.validate_all(
+            "DATE(x)",
+            read={"": "TS_OR_DS_TO_DATE(x)"},
+        )
+        self.validate_all(
+            "STR_TO_DATE(x, '%M')",
+            read={"": "TS_OR_DS_TO_DATE(x, '%B')"},
+        )
+        self.validate_all(
+            "STR_TO_DATE(x, '%Y-%m-%d')",
+            write={"presto": "CAST(DATE_PARSE(x, '%Y-%m-%d') AS DATE)"},
+        )
+        self.validate_all(
+            "STR_TO_DATE(x, '%Y-%m-%dT%T')", write={"presto": "DATE_PARSE(x, '%Y-%m-%dT%T')"}
+        )
 
     def test_mysql(self):
+        self.validate_all(
+            # MySQL doesn't support FULL OUTER joins
+            "WITH t1 AS (SELECT 1) SELECT * FROM t1 LEFT OUTER JOIN t2 ON t1.x = t2.x UNION SELECT * FROM t1 RIGHT OUTER JOIN t2 ON t1.x = t2.x",
+            read={
+                "postgres": "WITH t1 AS (SELECT 1) SELECT * FROM t1 FULL OUTER JOIN t2 ON t1.x = t2.x",
+            },
+        )
+        self.validate_all(
+            "a XOR b",
+            read={
+                "mysql": "a XOR b",
+                "snowflake": "BOOLXOR(a, b)",
+            },
+            write={
+                "duckdb": "(a AND (NOT b)) OR ((NOT a) AND b)",
+                "mysql": "a XOR b",
+                "postgres": "(a AND (NOT b)) OR ((NOT a) AND b)",
+                "snowflake": "BOOLXOR(a, b)",
+                "trino": "(a AND (NOT b)) OR ((NOT a) AND b)",
+            },
+        )
+
+        self.validate_all(
+            "SELECT * FROM test LIMIT 0 + 1, 0 + 1",
+            write={
+                "mysql": "SELECT * FROM test LIMIT 1 OFFSET 1",
+                "postgres": "SELECT * FROM test LIMIT 0 + 1 OFFSET 0 + 1",
+                "presto": "SELECT * FROM test OFFSET 1 LIMIT 1",
+                "snowflake": "SELECT * FROM test LIMIT 1 OFFSET 1",
+                "trino": "SELECT * FROM test OFFSET 1 LIMIT 1",
+                "bigquery": "SELECT * FROM test LIMIT 1 OFFSET 1",
+            },
+        )
+        self.validate_all(
+            "CAST(x AS TEXT)",
+            write={
+                "mysql": "CAST(x AS CHAR)",
+                "presto": "CAST(x AS VARCHAR)",
+                "starrocks": "CAST(x AS STRING)",
+            },
+        )
         self.validate_all("CAST(x AS SIGNED)", write={"mysql": "CAST(x AS SIGNED)"})
         self.validate_all("CAST(x AS SIGNED INTEGER)", write={"mysql": "CAST(x AS SIGNED)"})
         self.validate_all("CAST(x AS UNSIGNED)", write={"mysql": "CAST(x AS UNSIGNED)"})
         self.validate_all("CAST(x AS UNSIGNED INTEGER)", write={"mysql": "CAST(x AS UNSIGNED)"})
+        self.validate_all("TIME_STR_TO_TIME(x)", write={"mysql": "CAST(x AS DATETIME)"})
         self.validate_all(
             """SELECT 17 MEMBER OF('[23, "abc", 17, "ab", 10]')""",
             write={
@@ -462,6 +648,7 @@ class TestMySQL(Validator):
                 "mysql": "SELECT DATE(DATE_SUB(`dt`, INTERVAL (DAYOFMONTH(`dt`) - 1) DAY)) AS __timestamp FROM tableT",
             },
         )
+        self.validate_identity("SELECT name FROM temp WHERE name = ? FOR UPDATE")
         self.validate_all(
             "SELECT a FROM tbl FOR UPDATE",
             write={
@@ -470,7 +657,7 @@ class TestMySQL(Validator):
                 "oracle": "SELECT a FROM tbl FOR UPDATE",
                 "postgres": "SELECT a FROM tbl FOR UPDATE",
                 "redshift": "SELECT a FROM tbl",
-                "tsql": "SELECT a FROM tbl FOR UPDATE",
+                "tsql": "SELECT a FROM tbl",
             },
         )
         self.validate_all(
@@ -480,7 +667,7 @@ class TestMySQL(Validator):
                 "mysql": "SELECT a FROM tbl FOR SHARE",
                 "oracle": "SELECT a FROM tbl FOR SHARE",
                 "postgres": "SELECT a FROM tbl FOR SHARE",
-                "tsql": "SELECT a FROM tbl FOR SHARE",
+                "tsql": "SELECT a FROM tbl",
             },
         )
         self.validate_all(
@@ -789,3 +976,45 @@ COMMENT='客户账户表'"""
 
         cmd = self.parse_one("SET x = 1, y = 2")
         self.assertEqual(len(cmd.expressions), 2)
+
+    def test_json_object(self):
+        self.validate_identity("SELECT JSON_OBJECT('id', 87, 'name', 'carrot')")
+
+    def test_is_null(self):
+        self.validate_all(
+            "SELECT ISNULL(x)", write={"": "SELECT (x IS NULL)", "mysql": "SELECT (x IS NULL)"}
+        )
+
+    def test_monthname(self):
+        self.validate_all(
+            "MONTHNAME(x)",
+            write={
+                "": "TIME_TO_STR(TS_OR_DS_TO_DATE(x), '%B')",
+                "mysql": "DATE_FORMAT(x, '%M')",
+            },
+        )
+
+    def test_safe_div(self):
+        self.validate_all(
+            "a / b",
+            write={
+                "bigquery": "a / NULLIF(b, 0)",
+                "clickhouse": "a / b",
+                "databricks": "a / NULLIF(b, 0)",
+                "duckdb": "a / b",
+                "hive": "a / b",
+                "mysql": "a / b",
+                "oracle": "a / NULLIF(b, 0)",
+                "snowflake": "a / NULLIF(b, 0)",
+                "spark": "a / b",
+                "starrocks": "a / b",
+                "drill": "CAST(a AS DOUBLE) / NULLIF(b, 0)",
+                "postgres": "CAST(a AS DOUBLE PRECISION) / NULLIF(b, 0)",
+                "presto": "CAST(a AS DOUBLE) / NULLIF(b, 0)",
+                "redshift": "CAST(a AS DOUBLE PRECISION) / NULLIF(b, 0)",
+                "sqlite": "CAST(a AS REAL) / b",
+                "teradata": "CAST(a AS DOUBLE) / NULLIF(b, 0)",
+                "trino": "CAST(a AS DOUBLE) / NULLIF(b, 0)",
+                "tsql": "CAST(a AS FLOAT) / NULLIF(b, 0)",
+            },
+        )

@@ -94,6 +94,16 @@ SELECT 'a' AS a FROM x GROUP BY 1;
 SELECT 'a' AS a FROM x AS x GROUP BY 1;
 
 # execute: false
+# dialect: oracle
+SELECT t."col" FROM tbl t;
+SELECT T."col" AS "col" FROM TBL T;
+
+# execute: false
+# dialect: oracle
+WITH base AS (SELECT x.dummy AS COL_1 FROM dual x) SELECT b."COL_1" FROM base b;
+WITH BASE AS (SELECT X.DUMMY AS COL_1 FROM DUAL X) SELECT B.COL_1 AS COL_1 FROM BASE B;
+
+# execute: false
 -- this query seems to be invalid in postgres and duckdb but valid in bigquery
 SELECT 2 a FROM x GROUP BY 1 HAVING a > 1;
 SELECT 2 AS a FROM x AS x GROUP BY 1 HAVING a > 1;
@@ -115,7 +125,7 @@ SELECT COALESCE(x.a) AS d FROM x JOIN y ON x.b = y.b GROUP BY d;
 SELECT COALESCE(x.a) AS d FROM x AS x JOIN y AS y ON x.b = y.b GROUP BY COALESCE(x.a);
 
 SELECT a + 1 AS d FROM x WHERE d > 1;
-SELECT x.a + 1 AS d FROM x AS x WHERE x.a + 1 > 1;
+SELECT x.a + 1 AS d FROM x AS x WHERE (x.a + 1) > 1;
 
 # execute: false
 SELECT a + 1 AS d, d + 2 FROM x;
@@ -290,6 +300,16 @@ WITH z AS (SELECT x.a AS a, x.b AS b FROM x AS x), q AS (SELECT z.b AS b FROM z)
 WITH z AS ((SELECT b FROM x UNION ALL SELECT b FROM y) ORDER BY b) SELECT * FROM z;
 WITH z AS ((SELECT x.b AS b FROM x AS x UNION ALL SELECT y.b AS b FROM y AS y) ORDER BY b) SELECT z.b AS b FROM z;
 
+WITH cte(x) AS (SELECT 1) SELECT * FROM cte AS cte(a);
+WITH cte AS (SELECT 1 AS x) SELECT cte.a AS a FROM cte AS cte(a);
+
+WITH cte(x, y) AS (SELECT 1, 2) SELECT cte.* FROM cte AS cte(a);
+WITH cte AS (SELECT 1 AS x, 2 AS y) SELECT cte.a AS a, cte.y AS y FROM cte AS cte(a);
+
+# execute: false
+WITH player AS (SELECT player.name, player.asset.info FROM players) SELECT * FROM player;
+WITH player AS (SELECT players.player.name AS name, players.player.asset.info AS info FROM players AS players) SELECT player.name AS name, player.info AS info FROM player;
+
 --------------------------------------
 -- Except and Replace
 --------------------------------------
@@ -306,6 +326,11 @@ SELECT x.b AS b, y.b AS b, y.c AS c FROM x AS x, y AS y;
 
 SELECT * EXCEPT(a) FROM x;
 SELECT x.b AS b FROM x AS x;
+
+# execute: false
+# note: this query would fail in the engine level because there are 0 selected columns
+SELECT * EXCEPT (a, b) FROM x;
+SELECT * EXCEPT (x.a, x.b) FROM x AS x;
 
 --------------------------------------
 -- Using
@@ -368,6 +393,9 @@ SELECT x.b AS b FROM t AS t JOIN x AS x ON t.a = x.a;
 SELECT a FROM t1 JOIN t2 USING(a);
 SELECT COALESCE(t1.a, t2.a) AS a FROM t1 AS t1 JOIN t2 AS t2 ON t1.a = t2.a;
 
+WITH m(a) AS (SELECT 1), n(b) AS (SELECT 1) SELECT * FROM m JOIN n AS foo(a) USING (a);
+WITH m AS (SELECT 1 AS a), n AS (SELECT 1 AS b) SELECT COALESCE(m.a, foo.a) AS a FROM m JOIN n AS foo(a) ON m.a = foo.a;
+
 --------------------------------------
 -- Hint with table reference
 --------------------------------------
@@ -407,11 +435,18 @@ SELECT x.a AS a, i.b AS b FROM x AS x CROSS JOIN UNNEST(SPLIT(x.b, ',')) AS i(b)
 SELECT c FROM (SELECT 1 a) AS x LATERAL VIEW EXPLODE(a) AS c;
 SELECT _q_0.c AS c FROM (SELECT 1 AS a) AS x LATERAL VIEW EXPLODE(x.a) _q_0 AS c;
 
+# execute: false
+SELECT * FROM foo(bar) AS t(c1, c2, c3);
+SELECT t.c1 AS c1, t.c2 AS c2, t.c3 AS c3 FROM FOO(bar) AS t(c1, c2, c3);
+
+# execute: false
+SELECT c1, c3 FROM foo(bar) AS t(c1, c2, c3);
+SELECT t.c1 AS c1, t.c3 AS c3 FROM FOO(bar) AS t(c1, c2, c3);
+
 --------------------------------------
 -- Window functions
 --------------------------------------
-
--- ORDER BY in window function
+# title: ORDER BY in window function
 SELECT a + 1 AS a, ROW_NUMBER() OVER (PARTITION BY b ORDER BY a) AS row_num FROM x;
 SELECT x.a + 1 AS a, ROW_NUMBER() OVER (PARTITION BY x.b ORDER BY x.a) AS row_num FROM x AS x;
 
@@ -429,9 +464,8 @@ SELECT x.a AS a, x.b AS b FROM x AS x QUALIFY COUNT(x.a) OVER (PARTITION BY x.b)
 --------------------------------------
 -- Expand laterals
 --------------------------------------
-
 # execute: false
-select 2 AS d, d + 1 FROM x WHERE d = 2 GROUP BY d;
+SELECT 2 AS d, d + 1 FROM x WHERE d = 2 GROUP BY d;
 SELECT 2 AS d, 2 + 1 AS _col_1 FROM x AS x WHERE 2 = 2 GROUP BY 1;
 
 # title: expand alias reference
@@ -457,3 +491,48 @@ FROM (
   FROM x
 );
 SELECT _q_0.i AS i, _q_0.j AS j FROM (SELECT x.a + 1 AS i, x.a + 1 + 1 AS j FROM x AS x) AS _q_0;
+
+# title: wrap expanded alias to ensure operator precedence isnt broken
+# execute: false
+SELECT x.a + x.b AS f, f * x.b FROM x;
+SELECT x.a + x.b AS f, (x.a + x.b) * x.b AS _col_1 FROM x AS x;
+
+# title: no need to wrap expanded alias
+# execute: false
+SELECT x.a + x.b AS f, f, f + 5 FROM x;
+SELECT x.a + x.b AS f, x.a + x.b AS _col_1, x.a + x.b + 5 AS _col_2 FROM x AS x;
+
+--------------------------------------
+-- Wrapped tables / join constructs
+--------------------------------------
+# execute: false
+SELECT * FROM ((tbl));
+SELECT * FROM ((tbl AS tbl));
+
+SELECT a, c FROM (x LEFT JOIN y ON a = c);
+SELECT x.a AS a, y.c AS c FROM (x AS x LEFT JOIN y AS y ON x.a = y.c);
+
+# execute: false
+SELECT * FROM ((a CROSS JOIN ((b CROSS JOIN c) CROSS JOIN (d CROSS JOIN e))));
+SELECT * FROM ((a AS a CROSS JOIN ((b AS b CROSS JOIN c AS c) CROSS JOIN (d AS d CROSS JOIN e AS e))));
+
+# execute: false
+SELECT * FROM ((SELECT * FROM tbl));
+SELECT * FROM ((SELECT * FROM tbl AS tbl) AS _q_0);
+
+# execute: false
+SELECT * FROM ((SELECT c FROM t1) JOIN t2);
+SELECT * FROM ((SELECT t1.c AS c FROM t1 AS t1) AS _q_0, t2 AS t2);
+
+# execute: false
+SELECT * FROM ((SELECT * FROM x) INNER JOIN y ON a = c);
+SELECT y.b AS b, y.c AS c, _q_0.a AS a, _q_0.b AS b FROM ((SELECT x.a AS a, x.b AS b FROM x AS x) AS _q_0 INNER JOIN y AS y ON _q_0.a = y.c);
+
+SELECT x.a, y.b, z.c FROM x LEFT JOIN (y INNER JOIN z ON y.c = z.c) ON x.b = y.b;
+SELECT x.a AS a, y.b AS b, z.c AS c FROM x AS x LEFT JOIN (y AS y INNER JOIN z AS z ON y.c = z.c) ON x.b = y.b;
+
+SELECT * FROM ((SELECT * FROM x) INNER JOIN (SELECT * FROM y) ON a = c);
+SELECT _q_0.a AS a, _q_0.b AS b, _q_1.b AS b, _q_1.c AS c FROM ((SELECT x.a AS a, x.b AS b FROM x AS x) AS _q_0 INNER JOIN (SELECT y.b AS b, y.c AS c FROM y AS y) AS _q_1 ON _q_0.a = _q_1.c);
+
+SELECT b FROM ((SELECT a FROM x) INNER JOIN y ON a = b);
+SELECT y.b AS b FROM ((SELECT x.a AS a FROM x AS x) AS _q_0 INNER JOIN y AS y ON _q_0.a = y.b);

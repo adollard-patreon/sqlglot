@@ -6,6 +6,99 @@ class TestDuckDB(Validator):
     dialect = "duckdb"
 
     def test_duckdb(self):
+        self.assertEqual(
+            parse_one("select * from t limit (select 5)").sql(dialect="duckdb"),
+            exp.select("*").from_("t").limit(exp.select("5").subquery()).sql(dialect="duckdb"),
+        )
+        self.assertEqual(
+            parse_one("select * from t offset (select 5)").sql(dialect="duckdb"),
+            exp.select("*").from_("t").offset(exp.select("5").subquery()).sql(dialect="duckdb"),
+        )
+
+        for struct_value in ("{'a': 1}", "struct_pack(a := 1)"):
+            self.validate_all(struct_value, write={"presto": UnsupportedError})
+
+        for join_type in ("SEMI", "ANTI"):
+            exists = "EXISTS" if join_type == "SEMI" else "NOT EXISTS"
+
+            self.validate_all(
+                f"SELECT * FROM t1 {join_type} JOIN t2 ON t1.x = t2.x",
+                write={
+                    "bigquery": f"SELECT * FROM t1 WHERE {exists}(SELECT 1 FROM t2 WHERE t1.x = t2.x)",
+                    "clickhouse": f"SELECT * FROM t1 {join_type} JOIN t2 ON t1.x = t2.x",
+                    "databricks": f"SELECT * FROM t1 {join_type} JOIN t2 ON t1.x = t2.x",
+                    "doris": f"SELECT * FROM t1 WHERE {exists}(SELECT 1 FROM t2 WHERE t1.x = t2.x)",
+                    "drill": f"SELECT * FROM t1 WHERE {exists}(SELECT 1 FROM t2 WHERE t1.x = t2.x)",
+                    "duckdb": f"SELECT * FROM t1 {join_type} JOIN t2 ON t1.x = t2.x",
+                    "hive": f"SELECT * FROM t1 {join_type} JOIN t2 ON t1.x = t2.x",
+                    "mysql": f"SELECT * FROM t1 WHERE {exists}(SELECT 1 FROM t2 WHERE t1.x = t2.x)",
+                    "oracle": f"SELECT * FROM t1 {join_type} JOIN t2 ON t1.x = t2.x",
+                    "postgres": f"SELECT * FROM t1 WHERE {exists}(SELECT 1 FROM t2 WHERE t1.x = t2.x)",
+                    "presto": f"SELECT * FROM t1 WHERE {exists}(SELECT 1 FROM t2 WHERE t1.x = t2.x)",
+                    "redshift": f"SELECT * FROM t1 WHERE {exists}(SELECT 1 FROM t2 WHERE t1.x = t2.x)",
+                    "snowflake": f"SELECT * FROM t1 WHERE {exists}(SELECT 1 FROM t2 WHERE t1.x = t2.x)",
+                    "spark": f"SELECT * FROM t1 {join_type} JOIN t2 ON t1.x = t2.x",
+                    "sqlite": f"SELECT * FROM t1 WHERE {exists}(SELECT 1 FROM t2 WHERE t1.x = t2.x)",
+                    "starrocks": f"SELECT * FROM t1 WHERE {exists}(SELECT 1 FROM t2 WHERE t1.x = t2.x)",
+                    "teradata": f"SELECT * FROM t1 WHERE {exists}(SELECT 1 FROM t2 WHERE t1.x = t2.x)",
+                    "trino": f"SELECT * FROM t1 WHERE {exists}(SELECT 1 FROM t2 WHERE t1.x = t2.x)",
+                    "tsql": f"SELECT * FROM t1 WHERE {exists}(SELECT 1 FROM t2 WHERE t1.x = t2.x)",
+                },
+            )
+            self.validate_all(
+                f"SELECT * FROM t1 {join_type} JOIN t2 ON t1.x = t2.x",
+                read={
+                    "duckdb": f"SELECT * FROM t1 {join_type} JOIN t2 ON t1.x = t2.x",
+                    "spark": f"SELECT * FROM t1 LEFT {join_type} JOIN t2 ON t1.x = t2.x",
+                },
+            )
+
+        self.validate_all(
+            "WITH cte(x) AS (SELECT 1 UNION ALL SELECT 2 UNION ALL SELECT 3) SELECT AVG(x) FILTER (WHERE x > 1) FROM cte",
+            write={
+                "duckdb": "WITH cte(x) AS (SELECT 1 UNION ALL SELECT 2 UNION ALL SELECT 3) SELECT AVG(x) FILTER(WHERE x > 1) FROM cte",
+                "snowflake": "WITH cte(x) AS (SELECT 1 UNION ALL SELECT 2 UNION ALL SELECT 3) SELECT AVG(IFF(x > 1, x, NULL)) FROM cte",
+            },
+        )
+        self.validate_all(
+            "SELECT AVG(x) FILTER (WHERE TRUE) FROM t",
+            write={
+                "duckdb": "SELECT AVG(x) FILTER(WHERE TRUE) FROM t",
+                "snowflake": "SELECT AVG(IFF(TRUE, x, NULL)) FROM t",
+            },
+        )
+        self.validate_all(
+            "SELECT UNNEST(ARRAY[1, 2, 3]), UNNEST(ARRAY[4, 5]), UNNEST(ARRAY[6])",
+            write={
+                "bigquery": "SELECT IF(pos = pos_2, col, NULL) AS col, IF(pos = pos_3, col_2, NULL) AS col_2, IF(pos = pos_4, col_3, NULL) AS col_3 FROM UNNEST(GENERATE_ARRAY(0, GREATEST(ARRAY_LENGTH([1, 2, 3]), ARRAY_LENGTH([4, 5]), ARRAY_LENGTH([6])) - 1)) AS pos CROSS JOIN UNNEST([1, 2, 3]) AS col WITH OFFSET AS pos_2 CROSS JOIN UNNEST([4, 5]) AS col_2 WITH OFFSET AS pos_3 CROSS JOIN UNNEST([6]) AS col_3 WITH OFFSET AS pos_4 WHERE ((pos = pos_2 OR (pos > (ARRAY_LENGTH([1, 2, 3]) - 1) AND pos_2 = (ARRAY_LENGTH([1, 2, 3]) - 1))) AND (pos = pos_3 OR (pos > (ARRAY_LENGTH([4, 5]) - 1) AND pos_3 = (ARRAY_LENGTH([4, 5]) - 1)))) AND (pos = pos_4 OR (pos > (ARRAY_LENGTH([6]) - 1) AND pos_4 = (ARRAY_LENGTH([6]) - 1)))",
+                "presto": "SELECT IF(pos = pos_2, col) AS col, IF(pos = pos_3, col_2) AS col_2, IF(pos = pos_4, col_3) AS col_3 FROM UNNEST(SEQUENCE(1, GREATEST(CARDINALITY(ARRAY[1, 2, 3]), CARDINALITY(ARRAY[4, 5]), CARDINALITY(ARRAY[6])))) AS _u(pos) CROSS JOIN UNNEST(ARRAY[1, 2, 3]) WITH ORDINALITY AS _u_2(col, pos_2) CROSS JOIN UNNEST(ARRAY[4, 5]) WITH ORDINALITY AS _u_3(col_2, pos_3) CROSS JOIN UNNEST(ARRAY[6]) WITH ORDINALITY AS _u_4(col_3, pos_4) WHERE ((pos = pos_2 OR (pos > CARDINALITY(ARRAY[1, 2, 3]) AND pos_2 = CARDINALITY(ARRAY[1, 2, 3]))) AND (pos = pos_3 OR (pos > CARDINALITY(ARRAY[4, 5]) AND pos_3 = CARDINALITY(ARRAY[4, 5])))) AND (pos = pos_4 OR (pos > CARDINALITY(ARRAY[6]) AND pos_4 = CARDINALITY(ARRAY[6])))",
+            },
+        )
+
+        self.validate_all(
+            "SELECT UNNEST(ARRAY[1, 2, 3]), UNNEST(ARRAY[4, 5]), UNNEST(ARRAY[6]) FROM x",
+            write={
+                "bigquery": "SELECT IF(pos = pos_2, col, NULL) AS col, IF(pos = pos_3, col_2, NULL) AS col_2, IF(pos = pos_4, col_3, NULL) AS col_3 FROM x, UNNEST(GENERATE_ARRAY(0, GREATEST(ARRAY_LENGTH([1, 2, 3]), ARRAY_LENGTH([4, 5]), ARRAY_LENGTH([6])) - 1)) AS pos CROSS JOIN UNNEST([1, 2, 3]) AS col WITH OFFSET AS pos_2 CROSS JOIN UNNEST([4, 5]) AS col_2 WITH OFFSET AS pos_3 CROSS JOIN UNNEST([6]) AS col_3 WITH OFFSET AS pos_4 WHERE ((pos = pos_2 OR (pos > (ARRAY_LENGTH([1, 2, 3]) - 1) AND pos_2 = (ARRAY_LENGTH([1, 2, 3]) - 1))) AND (pos = pos_3 OR (pos > (ARRAY_LENGTH([4, 5]) - 1) AND pos_3 = (ARRAY_LENGTH([4, 5]) - 1)))) AND (pos = pos_4 OR (pos > (ARRAY_LENGTH([6]) - 1) AND pos_4 = (ARRAY_LENGTH([6]) - 1)))",
+                "presto": "SELECT IF(pos = pos_2, col) AS col, IF(pos = pos_3, col_2) AS col_2, IF(pos = pos_4, col_3) AS col_3 FROM x, UNNEST(SEQUENCE(1, GREATEST(CARDINALITY(ARRAY[1, 2, 3]), CARDINALITY(ARRAY[4, 5]), CARDINALITY(ARRAY[6])))) AS _u(pos) CROSS JOIN UNNEST(ARRAY[1, 2, 3]) WITH ORDINALITY AS _u_2(col, pos_2) CROSS JOIN UNNEST(ARRAY[4, 5]) WITH ORDINALITY AS _u_3(col_2, pos_3) CROSS JOIN UNNEST(ARRAY[6]) WITH ORDINALITY AS _u_4(col_3, pos_4) WHERE ((pos = pos_2 OR (pos > CARDINALITY(ARRAY[1, 2, 3]) AND pos_2 = CARDINALITY(ARRAY[1, 2, 3]))) AND (pos = pos_3 OR (pos > CARDINALITY(ARRAY[4, 5]) AND pos_3 = CARDINALITY(ARRAY[4, 5])))) AND (pos = pos_4 OR (pos > CARDINALITY(ARRAY[6]) AND pos_4 = CARDINALITY(ARRAY[6])))",
+            },
+        )
+        self.validate_all(
+            "SELECT UNNEST(x) + 1",
+            write={
+                "bigquery": "SELECT IF(pos = pos_2, col, NULL) + 1 AS col FROM UNNEST(GENERATE_ARRAY(0, GREATEST(ARRAY_LENGTH(x)) - 1)) AS pos CROSS JOIN UNNEST(x) AS col WITH OFFSET AS pos_2 WHERE pos = pos_2 OR (pos > (ARRAY_LENGTH(x) - 1) AND pos_2 = (ARRAY_LENGTH(x) - 1))",
+            },
+        )
+        self.validate_all(
+            "SELECT UNNEST(x) + 1 AS y",
+            write={
+                "bigquery": "SELECT IF(pos = pos_2, y, NULL) + 1 AS y FROM UNNEST(GENERATE_ARRAY(0, GREATEST(ARRAY_LENGTH(x)) - 1)) AS pos CROSS JOIN UNNEST(x) AS y WITH OFFSET AS pos_2 WHERE pos = pos_2 OR (pos > (ARRAY_LENGTH(x) - 1) AND pos_2 = (ARRAY_LENGTH(x) - 1))",
+            },
+        )
+
+        self.validate_identity("SELECT i FROM RANGE(5) AS _(i) ORDER BY i ASC")
+        self.validate_identity("[x.STRING_SPLIT(' ')[1] FOR x IN ['1', '2', 3] IF x.CONTAINS('1')]")
+        self.validate_identity("INSERT INTO x BY NAME SELECT 1 AS y")
+        self.validate_identity("SELECT 1 AS x UNION ALL BY NAME SELECT 2 AS x")
         self.validate_identity("SELECT SUM(x) FILTER (x = 1)", "SELECT SUM(x) FILTER(WHERE x = 1)")
 
         # https://github.com/duckdb/duckdb/releases/tag/v0.8.0
@@ -16,6 +109,8 @@ class TestDuckDB(Validator):
             parse_one("a // b", read="duckdb").assert_is(exp.IntDiv).sql(dialect="duckdb"), "a // b"
         )
 
+        self.validate_identity("SELECT UNNEST(column, recursive := TRUE) FROM table")
+        self.validate_identity("VAR_POP(a)")
         self.validate_identity("SELECT * FROM foo ASOF LEFT JOIN bar ON a = b")
         self.validate_identity("PIVOT Cities ON Year USING SUM(Population)")
         self.validate_identity("PIVOT Cities ON Year USING FIRST(Population)")
@@ -31,6 +126,9 @@ class TestDuckDB(Validator):
         self.validate_identity("SELECT (x, x + 1, y) FROM (SELECT 1 AS x, 'a' AS y)")
         self.validate_identity("SELECT a.x FROM (SELECT {'x': 1, 'y': 2, 'z': 3} AS a)")
         self.validate_identity("ATTACH DATABASE ':memory:' AS new_database")
+        self.validate_identity("FROM  x SELECT x UNION SELECT 1", "SELECT x FROM x UNION SELECT 1")
+        self.validate_identity("FROM (FROM tbl)", "SELECT * FROM (SELECT * FROM tbl)")
+        self.validate_identity("FROM tbl", "SELECT * FROM tbl")
         self.validate_identity(
             "SELECT {'yes': 'duck', 'maybe': 'goose', 'huh': NULL, 'no': 'heron'}"
         )
@@ -50,12 +148,51 @@ class TestDuckDB(Validator):
             "SELECT * FROM (PIVOT Cities ON Year USING SUM(Population) GROUP BY Country) AS pivot_alias"
         )
 
-        self.validate_all("FROM (FROM tbl)", write={"duckdb": "SELECT * FROM (SELECT * FROM tbl)"})
-        self.validate_all("FROM tbl", write={"duckdb": "SELECT * FROM tbl"})
         self.validate_all("0b1010", write={"": "0 AS b1010"})
         self.validate_all("0x1010", write={"": "0 AS x1010"})
         self.validate_all("x ~ y", write={"duckdb": "REGEXP_MATCHES(x, y)"})
         self.validate_all("SELECT * FROM 'x.y'", write={"duckdb": 'SELECT * FROM "x.y"'})
+        self.validate_all(
+            "SELECT UNNEST([1, 2, 3])",
+            write={
+                "duckdb": "SELECT UNNEST([1, 2, 3])",
+                "snowflake": "SELECT IFF(pos = pos_2, col, NULL) AS col FROM (SELECT value FROM TABLE(FLATTEN(INPUT => ARRAY_GENERATE_RANGE(0, (GREATEST(ARRAY_SIZE([1, 2, 3])) - 1) + 1)))) AS _u(pos) CROSS JOIN (SELECT value, index FROM TABLE(FLATTEN(INPUT => [1, 2, 3]))) AS _u_2(col, pos_2) WHERE pos = pos_2 OR (pos > (ARRAY_SIZE([1, 2, 3]) - 1) AND pos_2 = (ARRAY_SIZE([1, 2, 3]) - 1))",
+            },
+        )
+        self.validate_all(
+            "VAR_POP(x)",
+            read={
+                "": "VARIANCE_POP(x)",
+            },
+            write={
+                "": "VARIANCE_POP(x)",
+            },
+        )
+        self.validate_all(
+            "DATE_DIFF('day', CAST(b AS DATE), CAST(a AS DATE))",
+            read={
+                "duckdb": "DATE_DIFF('day', CAST(b AS DATE), CAST(a AS DATE))",
+                "hive": "DATEDIFF(a, b)",
+                "spark": "DATEDIFF(a, b)",
+                "spark2": "DATEDIFF(a, b)",
+            },
+        )
+        self.validate_all(
+            "XOR(a, b)",
+            read={
+                "": "a ^ b",
+                "bigquery": "a ^ b",
+                "presto": "BITWISE_XOR(a, b)",
+                "postgres": "a # b",
+            },
+            write={
+                "": "a ^ b",
+                "bigquery": "a ^ b",
+                "duckdb": "XOR(a, b)",
+                "presto": "BITWISE_XOR(a, b)",
+                "postgres": "a # b",
+            },
+        )
         self.validate_all(
             "PIVOT_WIDER Cities ON Year USING SUM(Population)",
             write={"duckdb": "PIVOT Cities ON Year USING SUM(Population)"},
@@ -98,21 +235,22 @@ class TestDuckDB(Validator):
             },
         )
         self.validate_all(
-            "LIST_VALUE(0, 1, 2)",
+            "[0, 1, 2]",
             read={
                 "spark": "ARRAY(0, 1, 2)",
             },
             write={
                 "bigquery": "[0, 1, 2]",
-                "duckdb": "LIST_VALUE(0, 1, 2)",
+                "duckdb": "[0, 1, 2]",
                 "presto": "ARRAY[0, 1, 2]",
                 "spark": "ARRAY(0, 1, 2)",
             },
         )
         self.validate_all(
             "SELECT ARRAY_LENGTH([0], 1) AS x",
-            write={"duckdb": "SELECT ARRAY_LENGTH(LIST_VALUE(0), 1) AS x"},
+            write={"duckdb": "SELECT ARRAY_LENGTH([0], 1) AS x"},
         )
+        self.validate_identity("REGEXP_REPLACE(this, pattern, replacement, modifiers)")
         self.validate_all(
             "REGEXP_MATCHES(x, y)",
             write={
@@ -153,18 +291,20 @@ class TestDuckDB(Validator):
             "STRUCT_EXTRACT(x, 'abc')",
             write={
                 "duckdb": "STRUCT_EXTRACT(x, 'abc')",
-                "presto": 'x."abc"',
-                "hive": "x.`abc`",
-                "spark": "x.`abc`",
+                "presto": "x.abc",
+                "hive": "x.abc",
+                "postgres": "x.abc",
+                "redshift": "x.abc",
+                "spark": "x.abc",
             },
         )
         self.validate_all(
             "STRUCT_EXTRACT(STRUCT_EXTRACT(x, 'y'), 'abc')",
             write={
                 "duckdb": "STRUCT_EXTRACT(STRUCT_EXTRACT(x, 'y'), 'abc')",
-                "presto": 'x."y"."abc"',
-                "hive": "x.`y`.`abc`",
-                "spark": "x.`y`.`abc`",
+                "presto": "x.y.abc",
+                "hive": "x.y.abc",
+                "spark": "x.y.abc",
             },
         )
         self.validate_all(
@@ -201,7 +341,7 @@ class TestDuckDB(Validator):
             },
         )
         self.validate_all(
-            "LIST_SUM(LIST_VALUE(1, 2))",
+            "LIST_SUM([1, 2])",
             read={
                 "spark": "ARRAY_SUM(ARRAY(1, 2))",
             },
@@ -216,14 +356,14 @@ class TestDuckDB(Validator):
             "STRUCT_PACK(x := 1, y := '2')",
             write={
                 "duckdb": "{'x': 1, 'y': '2'}",
-                "spark": "STRUCT(x = 1, y = '2')",
+                "spark": "STRUCT(1 AS x, '2' AS y)",
             },
         )
         self.validate_all(
             "STRUCT_PACK(key1 := 'value1', key2 := 42)",
             write={
                 "duckdb": "{'key1': 'value1', 'key2': 42}",
-                "spark": "STRUCT(key1 = 'value1', key2 = 42)",
+                "spark": "STRUCT('value1' AS key1, 42 AS key2)",
             },
         )
         self.validate_all(
@@ -265,8 +405,8 @@ class TestDuckDB(Validator):
         self.validate_all(
             "SELECT fname, lname, age FROM person ORDER BY age DESC NULLS FIRST, fname ASC NULLS LAST, lname",
             write={
-                "": "SELECT fname, lname, age FROM person ORDER BY age DESC NULLS FIRST, fname NULLS LAST, lname NULLS LAST",
-                "duckdb": "SELECT fname, lname, age FROM person ORDER BY age DESC NULLS FIRST, fname, lname",
+                "": "SELECT fname, lname, age FROM person ORDER BY age DESC NULLS FIRST, fname ASC NULLS LAST, lname NULLS LAST",
+                "duckdb": "SELECT fname, lname, age FROM person ORDER BY age DESC NULLS FIRST, fname ASC, lname",
             },
         )
         self.validate_all(
@@ -279,14 +419,20 @@ class TestDuckDB(Validator):
             },
         )
         self.validate_all(
-            "ARRAY_CONCAT(LIST_VALUE(1, 2), LIST_VALUE(3, 4))",
-            write={
-                "duckdb": "ARRAY_CONCAT(LIST_VALUE(1, 2), LIST_VALUE(3, 4))",
-                "presto": "CONCAT(ARRAY[1, 2], ARRAY[3, 4])",
-                "hive": "CONCAT(ARRAY(1, 2), ARRAY(3, 4))",
-                "spark": "CONCAT(ARRAY(1, 2), ARRAY(3, 4))",
-                "snowflake": "ARRAY_CAT([1, 2], [3, 4])",
+            "ARRAY_CONCAT([1, 2], [3, 4])",
+            read={
                 "bigquery": "ARRAY_CONCAT([1, 2], [3, 4])",
+                "postgres": "ARRAY_CAT(ARRAY[1, 2], ARRAY[3, 4])",
+                "snowflake": "ARRAY_CAT([1, 2], [3, 4])",
+            },
+            write={
+                "bigquery": "ARRAY_CONCAT([1, 2], [3, 4])",
+                "duckdb": "ARRAY_CONCAT([1, 2], [3, 4])",
+                "hive": "CONCAT(ARRAY(1, 2), ARRAY(3, 4))",
+                "postgres": "ARRAY_CAT(ARRAY[1, 2], ARRAY[3, 4])",
+                "presto": "CONCAT(ARRAY[1, 2], ARRAY[3, 4])",
+                "snowflake": "ARRAY_CAT([1, 2], [3, 4])",
+                "spark": "CONCAT(ARRAY(1, 2), ARRAY(3, 4))",
             },
         )
         self.validate_all(
@@ -303,6 +449,30 @@ class TestDuckDB(Validator):
             "SELECT CAST('2020-05-06' AS DATE) + INTERVAL 5 DAY",
             read={"bigquery": "SELECT DATE_ADD(CAST('2020-05-06' AS DATE), INTERVAL 5 DAY)"},
         )
+        self.validate_all(
+            "SELECT QUANTILE_CONT(x, q) FROM t",
+            write={
+                "duckdb": "SELECT QUANTILE_CONT(x, q) FROM t",
+                "postgres": "SELECT PERCENTILE_CONT(q) WITHIN GROUP (ORDER BY x) FROM t",
+                "snowflake": "SELECT PERCENTILE_CONT(q) WITHIN GROUP (ORDER BY x) FROM t",
+            },
+        )
+        self.validate_all(
+            "SELECT QUANTILE_DISC(x, q) FROM t",
+            write={
+                "duckdb": "SELECT QUANTILE_DISC(x, q) FROM t",
+                "postgres": "SELECT PERCENTILE_DISC(q) WITHIN GROUP (ORDER BY x) FROM t",
+                "snowflake": "SELECT PERCENTILE_DISC(q) WITHIN GROUP (ORDER BY x) FROM t",
+            },
+        )
+        self.validate_all(
+            "SELECT MEDIAN(x) FROM t",
+            write={
+                "duckdb": "SELECT QUANTILE_CONT(x, 0.5) FROM t",
+                "postgres": "SELECT PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY x) FROM t",
+                "snowflake": "SELECT PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY x) FROM t",
+            },
+        )
 
         with self.assertRaises(UnsupportedError):
             transpile(
@@ -311,6 +481,8 @@ class TestDuckDB(Validator):
                 write="duckdb",
                 unsupported_level=ErrorLevel.IMMEDIATE,
             )
+
+        self.validate_identity("SELECT ISNAN(x)")
 
     def test_time(self):
         self.validate_identity("SELECT CURRENT_DATE")
@@ -364,7 +536,7 @@ class TestDuckDB(Validator):
             write={
                 "bigquery": "UNIX_TO_TIME(x / 1000)",
                 "duckdb": "TO_TIMESTAMP(x / 1000)",
-                "presto": "FROM_UNIXTIME(x / 1000)",
+                "presto": "FROM_UNIXTIME(CAST(x AS DOUBLE) / 1000)",
                 "spark": "CAST(FROM_UNIXTIME(x / 1000) AS TIMESTAMP)",
             },
         )
@@ -374,7 +546,7 @@ class TestDuckDB(Validator):
                 "bigquery": "TIME_TO_STR(x, '%y-%-m-%S')",
                 "duckdb": "STRFTIME(x, '%y-%-m-%S')",
                 "postgres": "TO_CHAR(x, 'YY-FMMM-SS')",
-                "presto": "DATE_FORMAT(x, '%y-%c-%S')",
+                "presto": "DATE_FORMAT(x, '%y-%c-%s')",
                 "spark": "DATE_FORMAT(x, 'yy-M-ss')",
             },
         )
@@ -472,22 +644,47 @@ class TestDuckDB(Validator):
         self.validate_identity("CAST(x AS USMALLINT)")
         self.validate_identity("CAST(x AS UTINYINT)")
         self.validate_identity("CAST(x AS TEXT)")
+        self.validate_identity("CAST(x AS INT128)")
+        self.validate_identity("CAST(x AS DOUBLE)")
+        self.validate_identity("CAST(x AS DECIMAL(15, 4))")
+        self.validate_identity("CAST(x AS STRUCT(number BIGINT))")
+        self.validate_identity(
+            "CAST(ROW(1, ROW(1)) AS STRUCT(number BIGINT, row STRUCT(number BIGINT)))"
+        )
 
-        self.validate_all("CAST(x AS NUMERIC)", write={"duckdb": "CAST(x AS DOUBLE)"})
-        self.validate_all("CAST(x AS CHAR)", write={"duckdb": "CAST(x AS TEXT)"})
-        self.validate_all("CAST(x AS BPCHAR)", write={"duckdb": "CAST(x AS TEXT)"})
-        self.validate_all("CAST(x AS STRING)", write={"duckdb": "CAST(x AS TEXT)"})
-        self.validate_all("CAST(x AS INT1)", write={"duckdb": "CAST(x AS TINYINT)"})
-        self.validate_all("CAST(x AS FLOAT4)", write={"duckdb": "CAST(x AS REAL)"})
-        self.validate_all("CAST(x AS FLOAT)", write={"duckdb": "CAST(x AS REAL)"})
-        self.validate_all("CAST(x AS INT4)", write={"duckdb": "CAST(x AS INT)"})
-        self.validate_all("CAST(x AS INTEGER)", write={"duckdb": "CAST(x AS INT)"})
-        self.validate_all("CAST(x AS SIGNED)", write={"duckdb": "CAST(x AS INT)"})
-        self.validate_all("CAST(x AS BLOB)", write={"duckdb": "CAST(x AS BLOB)"})
-        self.validate_all("CAST(x AS BYTEA)", write={"duckdb": "CAST(x AS BLOB)"})
-        self.validate_all("CAST(x AS BINARY)", write={"duckdb": "CAST(x AS BLOB)"})
-        self.validate_all("CAST(x AS VARBINARY)", write={"duckdb": "CAST(x AS BLOB)"})
-        self.validate_all("CAST(x AS LOGICAL)", write={"duckdb": "CAST(x AS BOOLEAN)"})
+        self.validate_identity("CAST(x AS INT64)", "CAST(x AS BIGINT)")
+        self.validate_identity("CAST(x AS INT32)", "CAST(x AS INT)")
+        self.validate_identity("CAST(x AS INT16)", "CAST(x AS SMALLINT)")
+        self.validate_identity("CAST(x AS NUMERIC(1, 2))", "CAST(x AS DECIMAL(1, 2))")
+        self.validate_identity("CAST(x AS HUGEINT)", "CAST(x AS INT128)")
+        self.validate_identity("CAST(x AS CHAR)", "CAST(x AS TEXT)")
+        self.validate_identity("CAST(x AS BPCHAR)", "CAST(x AS TEXT)")
+        self.validate_identity("CAST(x AS STRING)", "CAST(x AS TEXT)")
+        self.validate_identity("CAST(x AS INT1)", "CAST(x AS TINYINT)")
+        self.validate_identity("CAST(x AS FLOAT4)", "CAST(x AS REAL)")
+        self.validate_identity("CAST(x AS FLOAT)", "CAST(x AS REAL)")
+        self.validate_identity("CAST(x AS INT4)", "CAST(x AS INT)")
+        self.validate_identity("CAST(x AS INTEGER)", "CAST(x AS INT)")
+        self.validate_identity("CAST(x AS SIGNED)", "CAST(x AS INT)")
+        self.validate_identity("CAST(x AS BLOB)", "CAST(x AS BLOB)")
+        self.validate_identity("CAST(x AS BYTEA)", "CAST(x AS BLOB)")
+        self.validate_identity("CAST(x AS BINARY)", "CAST(x AS BLOB)")
+        self.validate_identity("CAST(x AS VARBINARY)", "CAST(x AS BLOB)")
+        self.validate_identity("CAST(x AS LOGICAL)", "CAST(x AS BOOLEAN)")
+        self.validate_all(
+            "CAST(x AS NUMERIC)",
+            write={
+                "duckdb": "CAST(x AS DECIMAL(18, 3))",
+                "postgres": "CAST(x AS DECIMAL(18, 3))",
+            },
+        )
+        self.validate_all(
+            "CAST(x AS DECIMAL)",
+            write={
+                "duckdb": "CAST(x AS DECIMAL(18, 3))",
+                "postgres": "CAST(x AS DECIMAL(18, 3))",
+            },
+        )
         self.validate_all(
             "CAST(x AS BIT)",
             read={
@@ -507,7 +704,7 @@ class TestDuckDB(Validator):
         self.validate_all(
             "cast([[1]] as int[][])",
             write={
-                "duckdb": "CAST(LIST_VALUE(LIST_VALUE(1)) AS INT[][])",
+                "duckdb": "CAST([[1]] AS INT[][])",
                 "spark": "CAST(ARRAY(ARRAY(1)) AS ARRAY<ARRAY<INT>>)",
             },
         )
@@ -542,13 +739,13 @@ class TestDuckDB(Validator):
         self.validate_all(
             "CAST([STRUCT_PACK(a := 1)] AS STRUCT(a BIGINT)[])",
             write={
-                "duckdb": "CAST(LIST_VALUE({'a': 1}) AS STRUCT(a BIGINT)[])",
+                "duckdb": "CAST([{'a': 1}] AS STRUCT(a BIGINT)[])",
             },
         )
         self.validate_all(
             "CAST([[STRUCT_PACK(a := 1)]] AS STRUCT(a BIGINT)[][])",
             write={
-                "duckdb": "CAST(LIST_VALUE(LIST_VALUE({'a': 1})) AS STRUCT(a BIGINT)[][])",
+                "duckdb": "CAST([[{'a': 1}]] AS STRUCT(a BIGINT)[][])",
             },
         )
 
@@ -558,6 +755,38 @@ class TestDuckDB(Validator):
             write={"duckdb": "SELECT a, BOOL_OR(b) FROM table GROUP BY a"},
         )
 
+    def test_encode_decode(self):
+        self.validate_all(
+            "ENCODE(x)",
+            read={
+                "spark": "ENCODE(x, 'utf-8')",
+                "presto": "TO_UTF8(x)",
+            },
+            write={
+                "duckdb": "ENCODE(x)",
+                "spark": "ENCODE(x, 'utf-8')",
+                "presto": "TO_UTF8(x)",
+            },
+        )
+        self.validate_all(
+            "DECODE(x)",
+            read={
+                "spark": "DECODE(x, 'utf-8')",
+                "presto": "FROM_UTF8(x)",
+            },
+            write={
+                "duckdb": "DECODE(x)",
+                "spark": "DECODE(x, 'utf-8')",
+                "presto": "FROM_UTF8(x)",
+            },
+        )
+        self.validate_all(
+            "DECODE(x)",
+            read={
+                "presto": "FROM_UTF8(x, y)",
+            },
+        )
+
     def test_rename_table(self):
         self.validate_all(
             "ALTER TABLE db.t1 RENAME TO db.t2",
@@ -565,4 +794,26 @@ class TestDuckDB(Validator):
                 "snowflake": "ALTER TABLE db.t1 RENAME TO db.t2",
                 "duckdb": "ALTER TABLE db.t1 RENAME TO t2",
             },
+        )
+
+    def test_timestamps_with_units(self):
+        self.validate_all(
+            "SELECT w::TIMESTAMP_S, x::TIMESTAMP_MS, y::TIMESTAMP_US, z::TIMESTAMP_NS",
+            write={
+                "duckdb": "SELECT CAST(w AS TIMESTAMP_S), CAST(x AS TIMESTAMP_MS), CAST(y AS TIMESTAMP), CAST(z AS TIMESTAMP_NS)",
+            },
+        )
+
+    def test_isnan(self):
+        self.validate_all(
+            "ISNAN(x)",
+            read={"bigquery": "IS_NAN(x)"},
+            write={"bigquery": "IS_NAN(x)", "duckdb": "ISNAN(x)"},
+        )
+
+    def test_isinf(self):
+        self.validate_all(
+            "ISINF(x)",
+            read={"bigquery": "IS_INF(x)"},
+            write={"bigquery": "IS_INF(x)", "duckdb": "ISINF(x)"},
         )

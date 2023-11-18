@@ -45,6 +45,10 @@ def normalize(expression, **kwargs):
     return optimizer.simplify.simplify(expression)
 
 
+def simplify(expression, **kwargs):
+    return optimizer.simplify.simplify(expression, constant_propagation=True, **kwargs)
+
+
 class TestOptimizer(unittest.TestCase):
     maxDiff = None
 
@@ -98,6 +102,10 @@ class TestOptimizer(unittest.TestCase):
             "w": {
                 "d": "TEXT",
                 "e": "TEXT",
+            },
+            "temporal": {
+                "d": "DATE",
+                "t": "DATETIME",
             },
         }
 
@@ -175,6 +183,18 @@ class TestOptimizer(unittest.TestCase):
         )
 
     def test_qualify_tables(self):
+        self.assertEqual(
+            optimizer.qualify_tables.qualify_tables(
+                parse_one("select a from b"), catalog="catalog"
+            ).sql(),
+            "SELECT a FROM b AS b",
+        )
+
+        self.assertEqual(
+            optimizer.qualify_tables.qualify_tables(parse_one("select a from b"), db='"DB"').sql(),
+            'SELECT a FROM "DB".b AS b',
+        )
+
         self.check_file(
             "qualify_tables",
             optimizer.qualify_tables.qualify_tables,
@@ -223,12 +243,12 @@ class TestOptimizer(unittest.TestCase):
         self.assertEqual(
             optimizer.qualify.qualify(
                 parse_one(
-                    "WITH X AS (SELECT Y.A FROM DB.Y CROSS JOIN a.b.INFORMATION_SCHEMA.COLUMNS) SELECT `A` FROM X",
+                    "WITH X AS (SELECT Y.A FROM DB.y CROSS JOIN a.b.INFORMATION_SCHEMA.COLUMNS) SELECT `A` FROM X",
                     read="bigquery",
                 ),
                 dialect="bigquery",
             ).sql(),
-            'WITH "x" AS (SELECT "y"."a" AS "a" FROM "DB"."Y" AS "y" CROSS JOIN "a"."b"."INFORMATION_SCHEMA"."COLUMNS" AS "columns") SELECT "x"."a" AS "a" FROM "x"',
+            'WITH "x" AS (SELECT "y"."a" AS "a" FROM "DB"."y" AS "y" CROSS JOIN "a"."b"."INFORMATION_SCHEMA"."COLUMNS" AS "COLUMNS") SELECT "x"."a" AS "a" FROM "x"',
         )
 
         self.assertEqual(
@@ -242,7 +262,19 @@ class TestOptimizer(unittest.TestCase):
             "CREATE FUNCTION `udfs`.`myTest`(`x` FLOAT64) AS (1)",
         )
 
-        self.check_file("qualify_columns", qualify_columns, execute=True, schema=self.schema)
+        self.assertEqual(
+            optimizer.qualify.qualify(
+                parse_one("SELECT `bar_bazfoo_$id` FROM test", read="spark"),
+                schema={"test": {"bar_bazFoo_$id": "BIGINT"}},
+                dialect="spark",
+            ).sql(dialect="spark"),
+            "SELECT `test`.`bar_bazfoo_$id` AS `bar_bazfoo_$id` FROM `test` AS `test`",
+        )
+
+        self.check_file(
+            "qualify_columns", qualify_columns, execute=True, schema=self.schema, set_dialect=True
+        )
+        self.check_file("qualify_columns_ddl", qualify_columns, schema=self.schema)
 
     def test_qualify_columns__with_invisible(self):
         schema = MappingSchema(self.schema, {"x": {"a"}, "y": {"b"}, "z": {"b"}})
@@ -264,15 +296,38 @@ class TestOptimizer(unittest.TestCase):
             set_dialect=True,
         )
 
+        self.assertEqual(optimizer.normalize_identifiers.normalize_identifiers("a%").sql(), '"a%"')
+
+    def test_quote_identifiers(self):
+        self.check_file(
+            "quote_identifiers",
+            optimizer.qualify_columns.quote_identifiers,
+            set_dialect=True,
+        )
+
     def test_pushdown_projection(self):
         self.check_file("pushdown_projections", pushdown_projections, schema=self.schema)
 
     def test_simplify(self):
-        self.check_file("simplify", optimizer.simplify.simplify)
+        self.check_file("simplify", simplify)
 
         expression = parse_one("TRUE AND TRUE AND TRUE")
         self.assertEqual(exp.true(), optimizer.simplify.simplify(expression))
         self.assertEqual(exp.true(), optimizer.simplify.simplify(expression.this))
+
+        # CONCAT in (e.g.) Presto is parsed as Concat instead of SafeConcat which is the default type
+        # This test checks that simplify_concat preserves the corresponding expression types.
+        concat = parse_one("CONCAT('a', x, 'b', 'c')", read="presto")
+        simplified_concat = optimizer.simplify.simplify(concat)
+
+        safe_concat = parse_one("CONCAT('a', x, 'b', 'c')")
+        simplified_safe_concat = optimizer.simplify.simplify(safe_concat)
+
+        self.assertIs(type(simplified_concat), exp.Concat)
+        self.assertIs(type(simplified_safe_concat), exp.SafeConcat)
+
+        self.assertEqual("CONCAT('a', x, 'bc')", simplified_concat.sql(dialect="presto"))
+        self.assertEqual("CONCAT('a', x, 'bc')", simplified_safe_concat.sql())
 
     def test_unnest_subqueries(self):
         self.check_file(
@@ -288,7 +343,7 @@ class TestOptimizer(unittest.TestCase):
         # check order of lateral expansion with no schema
         self.assertEqual(
             optimizer.optimize("SELECT a + 1 AS d, d + 1 AS e FROM x WHERE e > 1 GROUP BY e").sql(),
-            'SELECT "x"."a" + 1 AS "d", "x"."a" + 1 + 1 AS "e" FROM "x" AS "x" WHERE "x"."a" + 2 > 1 GROUP BY "x"."a" + 1 + 1',
+            'SELECT "x"."a" + 1 AS "d", "x"."a" + 1 + 1 AS "e" FROM "x" AS "x" WHERE ("x"."a" + 2) > 1 GROUP BY "x"."a" + 1 + 1',
         )
 
         self.assertEqual(
@@ -427,6 +482,44 @@ FROM READ_CSV('tests/fixtures/optimizer/tpc-h/nation.csv.gz', 'delimiter', '|') 
             {"s.b"},
         )
 
+        # Check that parentheses don't introduce a new scope unless an alias is attached
+        sql = "SELECT * FROM (((SELECT * FROM (t1 JOIN t2) AS t3) JOIN (SELECT * FROM t4)))"
+        expression = parse_one(sql)
+        for scopes in traverse_scope(expression), list(build_scope(expression).traverse()):
+            self.assertEqual(len(scopes), 4)
+
+            self.assertEqual(scopes[0].expression.sql(), "t1, t2")
+            self.assertEqual(set(scopes[0].sources), {"t1", "t2"})
+
+            self.assertEqual(scopes[1].expression.sql(), "SELECT * FROM (t1, t2) AS t3")
+            self.assertEqual(set(scopes[1].sources), {"t3"})
+
+            self.assertEqual(scopes[2].expression.sql(), "SELECT * FROM t4")
+            self.assertEqual(set(scopes[2].sources), {"t4"})
+
+            self.assertEqual(
+                scopes[3].expression.sql(),
+                "SELECT * FROM (((SELECT * FROM (t1, t2) AS t3), (SELECT * FROM t4)))",
+            )
+            self.assertEqual(set(scopes[3].sources), {""})
+
+        inner_query = "SELECT bar FROM baz"
+        for udtf in (f"UNNEST(({inner_query}))", f"LATERAL ({inner_query})"):
+            sql = f"SELECT a FROM foo CROSS JOIN {udtf}"
+            expression = parse_one(sql)
+
+            for scopes in traverse_scope(expression), list(build_scope(expression).traverse()):
+                self.assertEqual(len(scopes), 3)
+
+                self.assertEqual(scopes[0].expression.sql(), inner_query)
+                self.assertEqual(set(scopes[0].sources), {"baz"})
+
+                self.assertEqual(scopes[1].expression.sql(), udtf)
+                self.assertEqual(set(scopes[1].sources), {"", "foo"})  # foo is a lateral source
+
+                self.assertEqual(scopes[2].expression.sql(), f"SELECT a FROM foo CROSS JOIN {udtf}")
+                self.assertEqual(set(scopes[2].sources), {"", "foo"})
+
     @patch("sqlglot.optimizer.scope.logger")
     def test_scope_warning(self, logger):
         self.assertEqual(len(traverse_scope(parse_one("WITH q AS (@y) SELECT * FROM q"))), 1)
@@ -490,6 +583,117 @@ FROM READ_CSV('tests/fixtures/optimizer/tpc-h/nation.csv.gz', 'delimiter', '|') 
         self.assertEqual(expression.right.this.type.this, exp.DataType.Type.INT)
         self.assertEqual(expression.right.this.left.type.this, exp.DataType.Type.INT)
         self.assertEqual(expression.right.this.right.type.this, exp.DataType.Type.INT)
+
+    def test_typeddiv_annotation(self):
+        expressions = annotate_types(
+            parse_one("SELECT 2 / 3, 2 / 3.0", dialect="presto")
+        ).expressions
+
+        self.assertEqual(expressions[0].type.this, exp.DataType.Type.BIGINT)
+        self.assertEqual(expressions[1].type.this, exp.DataType.Type.DOUBLE)
+
+    def test_bracket_annotation(self):
+        expression = annotate_types(parse_one("SELECT A[:]")).expressions[0]
+
+        self.assertEqual(expression.type.this, exp.DataType.Type.UNKNOWN)
+        self.assertEqual(expression.expressions[0].type.this, exp.DataType.Type.UNKNOWN)
+
+        expression = annotate_types(parse_one("SELECT ARRAY[1, 2, 3][1]")).expressions[0]
+        self.assertEqual(expression.this.type.sql(), "ARRAY<INT>")
+        self.assertEqual(expression.type.this, exp.DataType.Type.INT)
+
+        expression = annotate_types(parse_one("SELECT ARRAY[1, 2, 3][1 : 2]")).expressions[0]
+        self.assertEqual(expression.this.type.sql(), "ARRAY<INT>")
+        self.assertEqual(expression.type.sql(), "ARRAY<INT>")
+
+        expression = annotate_types(
+            parse_one("SELECT ARRAY[ARRAY[1], ARRAY[2], ARRAY[3]][1][2]")
+        ).expressions[0]
+        self.assertEqual(expression.this.this.type.sql(), "ARRAY<ARRAY<INT>>")
+        self.assertEqual(expression.this.type.sql(), "ARRAY<INT>")
+        self.assertEqual(expression.type.this, exp.DataType.Type.INT)
+
+        expression = annotate_types(
+            parse_one("SELECT ARRAY[ARRAY[1], ARRAY[2], ARRAY[3]][1:2]")
+        ).expressions[0]
+        self.assertEqual(expression.type.sql(), "ARRAY<ARRAY<INT>>")
+
+        expression = annotate_types(parse_one("MAP(1.0, 2, '2', 3.0)['2']", read="spark"))
+        self.assertEqual(expression.type.this, exp.DataType.Type.DOUBLE)
+
+        expression = annotate_types(parse_one("MAP(1.0, 2, x, 3.0)[2]", read="spark"))
+        self.assertEqual(expression.type.this, exp.DataType.Type.UNKNOWN)
+
+        expression = annotate_types(parse_one("MAP(ARRAY(1.0, x), ARRAY(2, 3.0))[x]"))
+        self.assertEqual(expression.type.this, exp.DataType.Type.DOUBLE)
+
+        expression = annotate_types(
+            parse_one("SELECT MAP(1.0, 2, 2, t.y)[2] FROM t", read="spark"),
+            schema={"t": {"y": "int"}},
+        ).expressions[0]
+        self.assertEqual(expression.type.this, exp.DataType.Type.INT)
+
+    def test_interval_math_annotation(self):
+        schema = {
+            "x": {
+                "a": "DATE",
+                "b": "DATETIME",
+            }
+        }
+        for sql, expected_type in [
+            (
+                "SELECT '2023-01-01' + INTERVAL '1' DAY",
+                exp.DataType.Type.DATE,
+            ),
+            (
+                "SELECT '2023-01-01' + INTERVAL '1' HOUR",
+                exp.DataType.Type.DATETIME,
+            ),
+            (
+                "SELECT '2023-01-01 00:00:01' + INTERVAL '1' HOUR",
+                exp.DataType.Type.DATETIME,
+            ),
+            ("SELECT 'nonsense' + INTERVAL '1' DAY", exp.DataType.Type.UNKNOWN),
+            ("SELECT x.a + INTERVAL '1' DAY FROM x AS x", exp.DataType.Type.DATE),
+            (
+                "SELECT x.a + INTERVAL '1' HOUR FROM x AS x",
+                exp.DataType.Type.DATETIME,
+            ),
+            ("SELECT x.b + INTERVAL '1' DAY FROM x AS x", exp.DataType.Type.DATETIME),
+            ("SELECT x.b + INTERVAL '1' HOUR FROM x AS x", exp.DataType.Type.DATETIME),
+            (
+                "SELECT DATE_ADD('2023-01-01', 1, 'DAY')",
+                exp.DataType.Type.DATE,
+            ),
+            (
+                "SELECT DATE_ADD('2023-01-01 00:00:00', 1, 'DAY')",
+                exp.DataType.Type.DATETIME,
+            ),
+            ("SELECT DATE_ADD(x.a, 1, 'DAY') FROM x AS x", exp.DataType.Type.DATE),
+            (
+                "SELECT DATE_ADD(x.a, 1, 'HOUR') FROM x AS x",
+                exp.DataType.Type.DATETIME,
+            ),
+            ("SELECT DATE_ADD(x.b, 1, 'DAY') FROM x AS x", exp.DataType.Type.DATETIME),
+            ("SELECT DATE_TRUNC('DAY', x.a) FROM x AS x", exp.DataType.Type.DATE),
+            ("SELECT DATE_TRUNC('DAY', x.b) FROM x AS x", exp.DataType.Type.DATETIME),
+            (
+                "SELECT DATE_TRUNC('SECOND', x.a) FROM x AS x",
+                exp.DataType.Type.DATETIME,
+            ),
+            (
+                "SELECT DATE_TRUNC('DAY', '2023-01-01') FROM x AS x",
+                exp.DataType.Type.DATE,
+            ),
+            (
+                "SELECT DATEDIFF('2023-01-01', '2023-01-02', DAY) FROM x AS x",
+                exp.DataType.Type.INT,
+            ),
+        ]:
+            with self.subTest(sql):
+                expression = annotate_types(parse_one(sql), schema=schema)
+                self.assertEqual(expected_type, expression.expressions[0].type.this)
+                self.assertEqual(sql, expression.sql())
 
     def test_lateral_annotation(self):
         expression = optimizer.optimize(
@@ -624,7 +828,7 @@ FROM READ_CSV('tests/fixtures/optimizer/tpc-h/nation.csv.gz', 'delimiter', '|') 
 
     def test_unknown_annotation(self):
         schema = {"x": {"cola": "VARCHAR"}}
-        sql = "SELECT x.cola || SOME_ANONYMOUS_FUNC(x.cola) AS col FROM x AS x"
+        sql = "SELECT x.cola + SOME_ANONYMOUS_FUNC(x.cola) AS col FROM x AS x"
 
         concat_expr_alias = annotate_types(parse_one(sql), schema=schema).expressions[0]
         self.assertEqual(concat_expr_alias.type.this, exp.DataType.Type.UNKNOWN)
@@ -647,7 +851,7 @@ FROM READ_CSV('tests/fixtures/optimizer/tpc-h/nation.csv.gz', 'delimiter', '|') 
         self.assertEqual(expression.right.type.this, exp.DataType.Type.INT)
 
         # NULL <op> UNKNOWN should yield NULL
-        sql = "SELECT NULL || SOME_ANONYMOUS_FUNC() AS result"
+        sql = "SELECT NULL + SOME_ANONYMOUS_FUNC() AS result"
 
         concat_expr_alias = annotate_types(parse_one(sql)).expressions[0]
         self.assertEqual(concat_expr_alias.type.this, exp.DataType.Type.NULL)
@@ -685,6 +889,8 @@ FROM READ_CSV('tests/fixtures/optimizer/tpc-h/nation.csv.gz', 'delimiter', '|') 
             ("MAX", "cold"): exp.DataType.Type.DATE,
             ("COUNT", "colb"): exp.DataType.Type.BIGINT,
             ("STDDEV", "cola"): exp.DataType.Type.DOUBLE,
+            ("ABS", "cola"): exp.DataType.Type.SMALLINT,
+            ("ABS", "colb"): exp.DataType.Type.FLOAT,
         }
 
         for (func, col), target_type in tests.items():
@@ -702,6 +908,47 @@ FROM READ_CSV('tests/fixtures/optimizer/tpc-h/nation.csv.gz', 'delimiter', '|') 
         self.assertIsInstance(expression, exp.Subquery)
         self.assertEqual(exp.DataType.Type.INT, expression.selects[0].type.this)
         self.assertEqual(exp.DataType.Type.INT, expression.selects[1].type.this)
+
+    def test_nested_type_annotation(self):
+        schema = {"order": {"customer_id": "bigint", "item_id": "bigint", "item_price": "numeric"}}
+        sql = """
+            SELECT ARRAY_AGG(DISTINCT order.item_id) FILTER (WHERE order.item_price > 10) AS items,
+            FROM order AS order
+            GROUP BY order.customer_id
+        """
+        expression = annotate_types(parse_one(sql), schema=schema)
+
+        self.assertEqual(exp.DataType.Type.ARRAY, expression.selects[0].type.this)
+        self.assertEqual(expression.selects[0].type.sql(), "ARRAY<BIGINT>")
+
+        expression = annotate_types(
+            parse_one("SELECT ARRAY_CAT(ARRAY[1,2,3], ARRAY[4,5])", read="postgres")
+        )
+        self.assertEqual(exp.DataType.Type.ARRAY, expression.selects[0].type.this)
+        self.assertEqual(expression.selects[0].type.sql(), "ARRAY<INT>")
+
+        schema = MappingSchema({"t": {"c": "STRUCT<`f` STRING>"}}, dialect="bigquery")
+        expression = annotate_types(parse_one("SELECT t.c FROM t"), schema=schema)
+
+        self.assertEqual(expression.selects[0].type.sql(dialect="bigquery"), "STRUCT<`f` STRING>")
+
+    def test_type_annotation_cache(self):
+        sql = "SELECT 1 + 1"
+        expression = annotate_types(parse_one(sql))
+
+        self.assertEqual(exp.DataType.Type.INT, expression.selects[0].type.this)
+
+        expression.selects[0].this.replace(parse_one("1.2"))
+        expression = annotate_types(expression)
+
+        self.assertEqual(exp.DataType.Type.DOUBLE, expression.selects[0].type.this)
+
+    def test_user_defined_type_annotation(self):
+        schema = MappingSchema({"t": {"x": "int"}}, dialect="postgres")
+        expression = annotate_types(parse_one("SELECT CAST(x AS IPADDRESS) FROM t"), schema=schema)
+
+        self.assertEqual(exp.DataType.Type.USERDEFINED, expression.selects[0].type.this)
+        self.assertEqual(expression.selects[0].type.sql(dialect="postgres"), "IPADDRESS")
 
     def test_recursive_cte(self):
         query = parse_one(
@@ -785,3 +1032,8 @@ FROM READ_CSV('tests/fixtures/optimizer/tpc-h/nation.csv.gz', 'delimiter', '|') 
             ),
             parse_one('SELECT "a"."a" AS "a", "a"."b" AS "b" FROM "a" AS "a"'),
         )
+
+    def test_semistructured(self):
+        query = parse_one("select a.b:c from d", read="snowflake")
+        qualified = optimizer.qualify.qualify(query)
+        self.assertEqual(qualified.expressions[0].alias, "c")

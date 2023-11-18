@@ -1,5 +1,6 @@
 from unittest import mock
 
+from sqlglot import exp, parse_one
 from tests.dialects.test_dialect import Validator
 
 
@@ -7,6 +8,8 @@ class TestSpark(Validator):
     dialect = "spark"
 
     def test_ddl(self):
+        self.validate_identity("CREATE TABLE foo AS WITH t AS (SELECT 1 AS col) SELECT col FROM t")
+        self.validate_identity("CREATE TEMPORARY VIEW test AS SELECT 1")
         self.validate_identity("CREATE TABLE foo (col VARCHAR(50))")
         self.validate_identity("CREATE TABLE foo (col STRUCT<struct_col_a: VARCHAR((50))>)")
         self.validate_identity("CREATE TABLE foo (col STRING) CLUSTERED BY (col) INTO 10 BUCKETS")
@@ -224,6 +227,22 @@ TBLPROPERTIES (
         )
 
     def test_spark(self):
+        expr = parse_one("any_value(col, true)", read="spark")
+        self.assertIsInstance(expr.args.get("ignore_nulls"), exp.Boolean)
+        self.assertEqual(expr.sql(dialect="spark"), "ANY_VALUE(col, TRUE)")
+
+        self.assertEqual(
+            parse_one("REFRESH TABLE t", read="spark").assert_is(exp.Refresh).sql(dialect="spark"),
+            "REFRESH TABLE t",
+        )
+
+        self.validate_identity("REFRESH 'hdfs://path/to/table'")
+        self.validate_identity("REFRESH TABLE tempDB.view1")
+        self.validate_identity("SELECT CASE WHEN a = NULL THEN 1 ELSE 2 END")
+        self.validate_identity("SELECT * FROM t1 SEMI JOIN t2 ON t1.x = t2.x")
+        self.validate_identity("SELECT TRANSFORM(ARRAY(1, 2, 3), x -> x + 1)")
+        self.validate_identity("SELECT TRANSFORM(ARRAY(1, 2, 3), (x, i) -> x + i)")
+        self.validate_identity("REFRESH TABLE a.b.c")
         self.validate_identity("INTERVAL -86 days")
         self.validate_identity("SELECT UNIX_TIMESTAMP()")
         self.validate_identity("TRIM('    SparkSQL   ')")
@@ -231,7 +250,98 @@ TBLPROPERTIES (
         self.validate_identity("TRIM(LEADING 'SL' FROM 'SSparkSQLS')")
         self.validate_identity("TRIM(TRAILING 'SL' FROM 'SSparkSQLS')")
         self.validate_identity("SPLIT(str, pattern, lim)")
+        self.validate_identity(
+            "SELECT REGEXP_REPLACE('100-200', r'([^0-9])', '')",
+            "SELECT REGEXP_REPLACE('100-200', '([^0-9])', '')",
+        )
+        self.validate_identity(
+            "SELECT REGEXP_REPLACE('100-200', R'([^0-9])', '')",
+            "SELECT REGEXP_REPLACE('100-200', '([^0-9])', '')",
+        )
+        self.validate_identity(
+            "SELECT STR_TO_MAP('a:1,b:2,c:3')",
+            "SELECT STR_TO_MAP('a:1,b:2,c:3', ',', ':')",
+        )
 
+        self.validate_all(
+            "foo.bar",
+            read={
+                "": "STRUCT_EXTRACT(foo, bar)",
+            },
+        )
+        self.validate_all(
+            "MAP(1, 2, 3, 4)",
+            write={
+                "spark": "MAP(1, 2, 3, 4)",
+                "trino": "MAP(ARRAY[1, 3], ARRAY[2, 4])",
+            },
+        )
+        self.validate_all(
+            "MAP()",
+            read={
+                "spark": "MAP()",
+                "trino": "MAP()",
+            },
+            write={
+                "trino": "MAP(ARRAY[], ARRAY[])",
+            },
+        )
+        self.validate_all(
+            "SELECT STR_TO_MAP('a:1,b:2,c:3', ',', ':')",
+            read={
+                "presto": "SELECT SPLIT_TO_MAP('a:1,b:2,c:3', ',', ':')",
+                "spark": "SELECT STR_TO_MAP('a:1,b:2,c:3', ',', ':')",
+            },
+            write={
+                "presto": "SELECT SPLIT_TO_MAP('a:1,b:2,c:3', ',', ':')",
+                "spark": "SELECT STR_TO_MAP('a:1,b:2,c:3', ',', ':')",
+            },
+        )
+        self.validate_all(
+            "SELECT DATEDIFF(month, CAST('1996-10-30' AS TIMESTAMP), CAST('1997-02-28 10:30:00' AS TIMESTAMP))",
+            read={
+                "duckdb": "SELECT DATEDIFF('month', CAST('1996-10-30' AS TIMESTAMP), CAST('1997-02-28 10:30:00' AS TIMESTAMP))",
+            },
+            write={
+                "spark": "SELECT DATEDIFF(month, TO_DATE(CAST('1996-10-30' AS TIMESTAMP)), TO_DATE(CAST('1997-02-28 10:30:00' AS TIMESTAMP)))",
+                "spark2": "SELECT CAST(MONTHS_BETWEEN(TO_DATE(CAST('1997-02-28 10:30:00' AS TIMESTAMP)), TO_DATE(CAST('1996-10-30' AS TIMESTAMP))) AS INT)",
+            },
+        )
+        self.validate_all(
+            "SELECT MONTHS_BETWEEN('1997-02-28 10:30:00', '1996-10-30')",
+            write={
+                "duckdb": "SELECT DATEDIFF('month', CAST('1996-10-30' AS TIMESTAMP), CAST('1997-02-28 10:30:00' AS TIMESTAMP))",
+                "hive": "SELECT MONTHS_BETWEEN('1997-02-28 10:30:00', '1996-10-30')",
+                "spark": "SELECT MONTHS_BETWEEN('1997-02-28 10:30:00', '1996-10-30')",
+            },
+        )
+        self.validate_all(
+            "SELECT MONTHS_BETWEEN('1997-02-28 10:30:00', '1996-10-30', FALSE)",
+            write={
+                "duckdb": "SELECT DATEDIFF('month', CAST('1996-10-30' AS TIMESTAMP), CAST('1997-02-28 10:30:00' AS TIMESTAMP))",
+                "hive": "SELECT MONTHS_BETWEEN('1997-02-28 10:30:00', '1996-10-30')",
+                "spark": "SELECT MONTHS_BETWEEN('1997-02-28 10:30:00', '1996-10-30', FALSE)",
+            },
+        )
+        self.validate_all(
+            "SELECT TO_TIMESTAMP('2016-12-31 00:12:00')",
+            write={
+                "": "SELECT CAST('2016-12-31 00:12:00' AS TIMESTAMP)",
+                "duckdb": "SELECT CAST('2016-12-31 00:12:00' AS TIMESTAMP)",
+                "spark": "SELECT CAST('2016-12-31 00:12:00' AS TIMESTAMP)",
+            },
+        )
+        self.validate_all(
+            "SELECT TO_TIMESTAMP('2016-12-31', 'yyyy-MM-dd')",
+            read={
+                "duckdb": "SELECT STRPTIME('2016-12-31', '%Y-%m-%d')",
+            },
+            write={
+                "": "SELECT STR_TO_TIME('2016-12-31', '%Y-%m-%d')",
+                "duckdb": "SELECT STRPTIME('2016-12-31', '%Y-%m-%d')",
+                "spark": "SELECT TO_TIMESTAMP('2016-12-31', 'yyyy-MM-dd')",
+            },
+        )
         self.validate_all(
             "SELECT RLIKE('John Doe', 'John.*')",
             write={
@@ -260,7 +370,18 @@ TBLPROPERTIES (
             "SELECT CAST(123456 AS VARCHAR(3))",
             write={
                 "": "SELECT TRY_CAST(123456 AS TEXT)",
+                "databricks": "SELECT TRY_CAST(123456 AS STRING)",
                 "spark": "SELECT CAST(123456 AS STRING)",
+                "spark2": "SELECT CAST(123456 AS STRING)",
+            },
+        )
+        self.validate_all(
+            "SELECT TRY_CAST('a' AS INT)",
+            write={
+                "": "SELECT TRY_CAST('a' AS INT)",
+                "databricks": "SELECT TRY_CAST('a' AS INT)",
+                "spark": "SELECT TRY_CAST('a' AS INT)",
+                "spark2": "SELECT CAST('a' AS INT)",
             },
         )
         self.validate_all(
@@ -291,10 +412,10 @@ TBLPROPERTIES (
             "SELECT DATEDIFF(MONTH, '2020-01-01', '2020-03-05')",
             write={
                 "databricks": "SELECT DATEDIFF(MONTH, TO_DATE('2020-01-01'), TO_DATE('2020-03-05'))",
-                "hive": "SELECT MONTHS_BETWEEN(TO_DATE('2020-03-05'), TO_DATE('2020-01-01'))",
+                "hive": "SELECT CAST(MONTHS_BETWEEN(TO_DATE('2020-03-05'), TO_DATE('2020-01-01')) AS INT)",
                 "presto": "SELECT DATE_DIFF('MONTH', CAST(CAST('2020-01-01' AS TIMESTAMP) AS DATE), CAST(CAST('2020-03-05' AS TIMESTAMP) AS DATE))",
                 "spark": "SELECT DATEDIFF(MONTH, TO_DATE('2020-01-01'), TO_DATE('2020-03-05'))",
-                "spark2": "SELECT MONTHS_BETWEEN(TO_DATE('2020-03-05'), TO_DATE('2020-01-01'))",
+                "spark2": "SELECT CAST(MONTHS_BETWEEN(TO_DATE('2020-03-05'), TO_DATE('2020-01-01')) AS INT)",
                 "trino": "SELECT DATE_DIFF('MONTH', CAST(CAST('2020-01-01' AS TIMESTAMP) AS DATE), CAST(CAST('2020-03-05' AS TIMESTAMP) AS DATE))",
             },
         )
@@ -351,7 +472,7 @@ TBLPROPERTIES (
             "ARRAY(0, 1, 2)",
             write={
                 "bigquery": "[0, 1, 2]",
-                "duckdb": "LIST_VALUE(0, 1, 2)",
+                "duckdb": "[0, 1, 2]",
                 "presto": "ARRAY[0, 1, 2]",
                 "hive": "ARRAY(0, 1, 2)",
                 "spark": "ARRAY(0, 1, 2)",
@@ -361,13 +482,13 @@ TBLPROPERTIES (
         self.validate_all(
             "SELECT fname, lname, age FROM person ORDER BY age DESC NULLS FIRST, fname ASC NULLS LAST, lname",
             write={
-                "clickhouse": "SELECT fname, lname, age FROM person ORDER BY age DESC NULLS FIRST, fname, lname NULLS FIRST",
-                "duckdb": "SELECT fname, lname, age FROM person ORDER BY age DESC NULLS FIRST, fname, lname NULLS FIRST",
-                "postgres": "SELECT fname, lname, age FROM person ORDER BY age DESC, fname, lname NULLS FIRST",
-                "presto": "SELECT fname, lname, age FROM person ORDER BY age DESC NULLS FIRST, fname, lname NULLS FIRST",
-                "hive": "SELECT fname, lname, age FROM person ORDER BY age DESC NULLS FIRST, fname NULLS LAST, lname",
-                "spark": "SELECT fname, lname, age FROM person ORDER BY age DESC NULLS FIRST, fname NULLS LAST, lname",
-                "snowflake": "SELECT fname, lname, age FROM person ORDER BY age DESC, fname, lname NULLS FIRST",
+                "clickhouse": "SELECT fname, lname, age FROM person ORDER BY age DESC NULLS FIRST, fname ASC, lname NULLS FIRST",
+                "duckdb": "SELECT fname, lname, age FROM person ORDER BY age DESC NULLS FIRST, fname ASC, lname NULLS FIRST",
+                "postgres": "SELECT fname, lname, age FROM person ORDER BY age DESC, fname ASC, lname NULLS FIRST",
+                "presto": "SELECT fname, lname, age FROM person ORDER BY age DESC NULLS FIRST, fname ASC, lname NULLS FIRST",
+                "hive": "SELECT fname, lname, age FROM person ORDER BY age DESC NULLS FIRST, fname ASC NULLS LAST, lname",
+                "spark": "SELECT fname, lname, age FROM person ORDER BY age DESC NULLS FIRST, fname ASC NULLS LAST, lname",
+                "snowflake": "SELECT fname, lname, age FROM person ORDER BY age DESC, fname ASC, lname NULLS FIRST",
             },
         )
         self.validate_all(
@@ -418,7 +539,7 @@ TBLPROPERTIES (
         self.validate_all(
             "MAP_FROM_ARRAYS(ARRAY(1), c)",
             write={
-                "duckdb": "MAP(LIST_VALUE(1), c)",
+                "duckdb": "MAP([1], c)",
                 "presto": "MAP(ARRAY[1], c)",
                 "hive": "MAP(ARRAY(1), c)",
                 "spark": "MAP_FROM_ARRAYS(ARRAY(1), c)",
@@ -455,4 +576,90 @@ TBLPROPERTIES (
         self.validate_all(
             "CURRENT_USER()",
             write={"spark": "CURRENT_USER()"},
+        )
+
+    def test_transform_query(self):
+        self.validate_identity("SELECT TRANSFORM(x) USING 'x' AS (x INT) FROM t")
+        self.validate_identity(
+            "SELECT TRANSFORM(zip_code, name, age) USING 'cat' AS (a, b, c) FROM person WHERE zip_code > 94511"
+        )
+        self.validate_identity(
+            "SELECT TRANSFORM(zip_code, name, age) USING 'cat' AS (a STRING, b STRING, c STRING) FROM person WHERE zip_code > 94511"
+        )
+        self.validate_identity(
+            "SELECT TRANSFORM(name, age) ROW FORMAT DELIMITED FIELDS TERMINATED BY ',' LINES TERMINATED BY '\n' NULL DEFINED AS 'NULL' USING 'cat' AS (name_age STRING) ROW FORMAT DELIMITED FIELDS TERMINATED BY '@' LINES TERMINATED BY '\n' NULL DEFINED AS 'NULL' FROM person"
+        )
+        self.validate_identity(
+            "SELECT TRANSFORM(zip_code, name, age) ROW FORMAT SERDE 'org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe' WITH SERDEPROPERTIES ('field.delim'='\t') USING 'cat' AS (a STRING, b STRING, c STRING) ROW FORMAT SERDE 'org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe' WITH SERDEPROPERTIES ('field.delim'='\t') FROM person WHERE zip_code > 94511"
+        )
+        self.validate_identity(
+            "SELECT TRANSFORM(zip_code, name, age) USING 'cat' FROM person WHERE zip_code > 94500"
+        )
+
+    def test_insert_cte(self):
+        self.validate_all(
+            "INSERT OVERWRITE TABLE table WITH cte AS (SELECT cola FROM other_table) SELECT cola FROM cte",
+            write={
+                "databricks": "WITH cte AS (SELECT cola FROM other_table) INSERT OVERWRITE TABLE table SELECT cola FROM cte",
+                "hive": "WITH cte AS (SELECT cola FROM other_table) INSERT OVERWRITE TABLE table SELECT cola FROM cte",
+                "spark": "WITH cte AS (SELECT cola FROM other_table) INSERT OVERWRITE TABLE table SELECT cola FROM cte",
+                "spark2": "WITH cte AS (SELECT cola FROM other_table) INSERT OVERWRITE TABLE table SELECT cola FROM cte",
+            },
+        )
+
+    def test_explode_to_unnest(self):
+        self.validate_all(
+            "SELECT EXPLODE(x) FROM tbl",
+            write={
+                "bigquery": "SELECT IF(pos = pos_2, col, NULL) AS col FROM tbl, UNNEST(GENERATE_ARRAY(0, GREATEST(ARRAY_LENGTH(x)) - 1)) AS pos CROSS JOIN UNNEST(x) AS col WITH OFFSET AS pos_2 WHERE pos = pos_2 OR (pos > (ARRAY_LENGTH(x) - 1) AND pos_2 = (ARRAY_LENGTH(x) - 1))",
+                "presto": "SELECT IF(pos = pos_2, col) AS col FROM tbl, UNNEST(SEQUENCE(1, GREATEST(CARDINALITY(x)))) AS _u(pos) CROSS JOIN UNNEST(x) WITH ORDINALITY AS _u_2(col, pos_2) WHERE pos = pos_2 OR (pos > CARDINALITY(x) AND pos_2 = CARDINALITY(x))",
+                "spark": "SELECT EXPLODE(x) FROM tbl",
+            },
+        )
+        self.validate_all(
+            "SELECT EXPLODE(col) FROM _u",
+            write={
+                "bigquery": "SELECT IF(pos = pos_2, col_2, NULL) AS col_2 FROM _u, UNNEST(GENERATE_ARRAY(0, GREATEST(ARRAY_LENGTH(col)) - 1)) AS pos CROSS JOIN UNNEST(col) AS col_2 WITH OFFSET AS pos_2 WHERE pos = pos_2 OR (pos > (ARRAY_LENGTH(col) - 1) AND pos_2 = (ARRAY_LENGTH(col) - 1))",
+                "presto": "SELECT IF(pos = pos_2, col_2) AS col_2 FROM _u, UNNEST(SEQUENCE(1, GREATEST(CARDINALITY(col)))) AS _u_2(pos) CROSS JOIN UNNEST(col) WITH ORDINALITY AS _u_3(col_2, pos_2) WHERE pos = pos_2 OR (pos > CARDINALITY(col) AND pos_2 = CARDINALITY(col))",
+                "spark": "SELECT EXPLODE(col) FROM _u",
+            },
+        )
+        self.validate_all(
+            "SELECT EXPLODE(col) AS exploded FROM schema.tbl",
+            write={
+                "presto": "SELECT IF(pos = pos_2, exploded) AS exploded FROM schema.tbl, UNNEST(SEQUENCE(1, GREATEST(CARDINALITY(col)))) AS _u(pos) CROSS JOIN UNNEST(col) WITH ORDINALITY AS _u_2(exploded, pos_2) WHERE pos = pos_2 OR (pos > CARDINALITY(col) AND pos_2 = CARDINALITY(col))",
+            },
+        )
+        self.validate_all(
+            "SELECT EXPLODE(ARRAY(1, 2))",
+            write={
+                "bigquery": "SELECT IF(pos = pos_2, col, NULL) AS col FROM UNNEST(GENERATE_ARRAY(0, GREATEST(ARRAY_LENGTH([1, 2])) - 1)) AS pos CROSS JOIN UNNEST([1, 2]) AS col WITH OFFSET AS pos_2 WHERE pos = pos_2 OR (pos > (ARRAY_LENGTH([1, 2]) - 1) AND pos_2 = (ARRAY_LENGTH([1, 2]) - 1))",
+                "presto": "SELECT IF(pos = pos_2, col) AS col FROM UNNEST(SEQUENCE(1, GREATEST(CARDINALITY(ARRAY[1, 2])))) AS _u(pos) CROSS JOIN UNNEST(ARRAY[1, 2]) WITH ORDINALITY AS _u_2(col, pos_2) WHERE pos = pos_2 OR (pos > CARDINALITY(ARRAY[1, 2]) AND pos_2 = CARDINALITY(ARRAY[1, 2]))",
+            },
+        )
+        self.validate_all(
+            "SELECT POSEXPLODE(ARRAY(2, 3)) AS x",
+            write={
+                "bigquery": "SELECT IF(pos = pos_2, x, NULL) AS x, IF(pos = pos_2, pos_2, NULL) AS pos_2 FROM UNNEST(GENERATE_ARRAY(0, GREATEST(ARRAY_LENGTH([2, 3])) - 1)) AS pos CROSS JOIN UNNEST([2, 3]) AS x WITH OFFSET AS pos_2 WHERE pos = pos_2 OR (pos > (ARRAY_LENGTH([2, 3]) - 1) AND pos_2 = (ARRAY_LENGTH([2, 3]) - 1))",
+                "presto": "SELECT IF(pos = pos_2, x) AS x, IF(pos = pos_2, pos_2) AS pos_2 FROM UNNEST(SEQUENCE(1, GREATEST(CARDINALITY(ARRAY[2, 3])))) AS _u(pos) CROSS JOIN UNNEST(ARRAY[2, 3]) WITH ORDINALITY AS _u_2(x, pos_2) WHERE pos = pos_2 OR (pos > CARDINALITY(ARRAY[2, 3]) AND pos_2 = CARDINALITY(ARRAY[2, 3]))",
+            },
+        )
+        self.validate_all(
+            "SELECT POSEXPLODE(x) AS (a, b)",
+            write={
+                "presto": "SELECT IF(pos = a, b) AS b, IF(pos = a, a) AS a FROM UNNEST(SEQUENCE(1, GREATEST(CARDINALITY(x)))) AS _u(pos) CROSS JOIN UNNEST(x) WITH ORDINALITY AS _u_2(b, a) WHERE pos = a OR (pos > CARDINALITY(x) AND a = CARDINALITY(x))",
+            },
+        )
+        self.validate_all(
+            "SELECT POSEXPLODE(ARRAY(2, 3)), EXPLODE(ARRAY(4, 5, 6)) FROM tbl",
+            write={
+                "bigquery": "SELECT IF(pos = pos_2, col, NULL) AS col, IF(pos = pos_2, pos_2, NULL) AS pos_2, IF(pos = pos_3, col_2, NULL) AS col_2 FROM tbl, UNNEST(GENERATE_ARRAY(0, GREATEST(ARRAY_LENGTH([2, 3]), ARRAY_LENGTH([4, 5, 6])) - 1)) AS pos CROSS JOIN UNNEST([2, 3]) AS col WITH OFFSET AS pos_2 CROSS JOIN UNNEST([4, 5, 6]) AS col_2 WITH OFFSET AS pos_3 WHERE (pos = pos_2 OR (pos > (ARRAY_LENGTH([2, 3]) - 1) AND pos_2 = (ARRAY_LENGTH([2, 3]) - 1))) AND (pos = pos_3 OR (pos > (ARRAY_LENGTH([4, 5, 6]) - 1) AND pos_3 = (ARRAY_LENGTH([4, 5, 6]) - 1)))",
+                "presto": "SELECT IF(pos = pos_2, col) AS col, IF(pos = pos_2, pos_2) AS pos_2, IF(pos = pos_3, col_2) AS col_2 FROM tbl, UNNEST(SEQUENCE(1, GREATEST(CARDINALITY(ARRAY[2, 3]), CARDINALITY(ARRAY[4, 5, 6])))) AS _u(pos) CROSS JOIN UNNEST(ARRAY[2, 3]) WITH ORDINALITY AS _u_2(col, pos_2) CROSS JOIN UNNEST(ARRAY[4, 5, 6]) WITH ORDINALITY AS _u_3(col_2, pos_3) WHERE (pos = pos_2 OR (pos > CARDINALITY(ARRAY[2, 3]) AND pos_2 = CARDINALITY(ARRAY[2, 3]))) AND (pos = pos_3 OR (pos > CARDINALITY(ARRAY[4, 5, 6]) AND pos_3 = CARDINALITY(ARRAY[4, 5, 6])))",
+            },
+        )
+        self.validate_all(
+            "SELECT col, pos, POSEXPLODE(ARRAY(2, 3)) FROM _u",
+            write={
+                "presto": "SELECT col, pos, IF(pos_2 = pos_3, col_2) AS col_2, IF(pos_2 = pos_3, pos_3) AS pos_3 FROM _u, UNNEST(SEQUENCE(1, GREATEST(CARDINALITY(ARRAY[2, 3])))) AS _u_2(pos_2) CROSS JOIN UNNEST(ARRAY[2, 3]) WITH ORDINALITY AS _u_3(col_2, pos_3) WHERE pos_2 = pos_3 OR (pos_2 > CARDINALITY(ARRAY[2, 3]) AND pos_3 = CARDINALITY(ARRAY[2, 3]))",
+            },
         )

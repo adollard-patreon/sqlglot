@@ -19,6 +19,9 @@ class TestTranspile(unittest.TestCase):
     def validate(self, sql, target, **kwargs):
         self.assertEqual(transpile(sql, **kwargs)[0], target)
 
+    def test_weird_chars(self):
+        self.assertEqual(transpile("0Êß")[0], "0 AS Êß")
+
     def test_alias(self):
         self.assertEqual(transpile("SELECT SUM(y) KEEP")[0], "SELECT SUM(y) AS KEEP")
         self.assertEqual(transpile("SELECT 1 overwrite")[0], "SELECT 1 AS overwrite")
@@ -43,9 +46,6 @@ class TestTranspile(unittest.TestCase):
 
                 with self.assertRaises(ParseError):
                     self.validate(f"SELECT x {key}", "")
-
-    def test_asc(self):
-        self.validate("SELECT x FROM y ORDER BY x ASC", "SELECT x FROM y ORDER BY x")
 
     def test_unary(self):
         self.validate("+++1", "1")
@@ -90,6 +90,30 @@ class TestTranspile(unittest.TestCase):
         self.validate("SELECT 3>=3", "SELECT 3 >= 3")
 
     def test_comments(self):
+        self.validate(
+            "SELECT * FROM t1\n/*x*/\nUNION ALL SELECT * FROM t2",
+            "SELECT * FROM t1 /* x */ UNION ALL SELECT * FROM t2",
+        )
+        self.validate(
+            "SELECT * FROM t1\n/*x*/\nINTERSECT ALL SELECT * FROM t2",
+            "SELECT * FROM t1 /* x */ INTERSECT ALL SELECT * FROM t2",
+        )
+        self.validate(
+            "SELECT\n  foo\n/* comments */\n;",
+            "SELECT foo /* comments */",
+        )
+        self.validate(
+            "SELECT * FROM a INNER /* comments */ JOIN b",
+            "SELECT * FROM a /* comments */ INNER JOIN b",
+        )
+        self.validate(
+            "SELECT * FROM a LEFT /* comment 1 */ OUTER /* comment 2 */ JOIN b",
+            "SELECT * FROM a /* comment 1 */ /* comment 2 */ LEFT OUTER JOIN b",
+        )
+        self.validate(
+            "SELECT CASE /* test */ WHEN a THEN b ELSE c END",
+            "SELECT CASE WHEN a THEN b ELSE c END /* test */",
+        )
         self.validate("SELECT 1 /*/2 */", "SELECT 1 /* /2 */")
         self.validate("SELECT */*comment*/", "SELECT * /* comment */")
         self.validate(
@@ -146,9 +170,7 @@ SELECT * FROM foo
 -- comment 2
 -- comment 3
 SELECT * FROM foo""",
-            """/* comment 1 */
-/* comment 2 */
-/* comment 3 */
+            """/* comment 1 */ /* comment 2 */ /* comment 3 */
 SELECT
   *
 FROM foo""",
@@ -172,8 +194,7 @@ line3*/ /*another comment*/ where 1=1 -- comment at the end""",
   *
 FROM tbl /* line1
 line2
-line3 */
-/* another comment */
+line3 */ /* another comment */
 WHERE
   1 = 1 /* comment at the end */""",
             pretty=True,
@@ -186,7 +207,7 @@ WHERE
             */
             SELECT
               tbl.cola /* comment 1 */ + tbl.colb /* comment 2 */,
-              CAST(x AS INT), # comment 3
+              CAST(x AS CHAR), # comment 3
               y               -- comment 4
             FROM
               bar /* comment 5 */,
@@ -198,7 +219,7 @@ WHERE
             */
 SELECT
   tbl.cola /* comment 1 */ + tbl.colb /* comment 2 */,
-  CAST(x AS INT), /* comment 3 */
+  CAST(x AS CHAR), /* comment 3 */
   y /* comment 4 */
 FROM bar /* comment 5 */, tbl /*          comment 6 */""",
             read="mysql",
@@ -211,9 +232,12 @@ FROM bar /* comment 5 */, tbl /*          comment 6 */""",
             -- comment 1
             AND bar
             -- comment 2
-            AND bla;
+            AND bla
+            -- comment 3
+            LIMIT 10
+            ;
             """,
-            "SELECT a FROM b WHERE foo AND /* comment 1 */ bar AND /* comment 2 */ bla",
+            "SELECT a FROM b WHERE foo AND /* comment 1 */ bar AND /* comment 2 */ bla LIMIT 10 /* comment 3 */",
         )
         self.validate(
             """
@@ -285,6 +309,131 @@ FROM v""",
             "SELECT 1 /* hi this is a comment */",
             read="snowflake",
         )
+        self.validate(
+            "-- comment\nDROP TABLE IF EXISTS foo",
+            "/* comment */ DROP TABLE IF EXISTS foo",
+        )
+        self.validate(
+            """
+            -- comment1
+            -- comment2
+
+            -- comment3
+            DROP TABLE IF EXISTS db.tba
+            """,
+            """/* comment1 */ /* comment2 */ /* comment3 */
+DROP TABLE IF EXISTS db.tba""",
+            pretty=True,
+        )
+        self.validate(
+            """
+            -- comment4
+            CREATE TABLE db.tba AS
+            SELECT a, b, c
+            FROM tb_01
+            WHERE
+            -- comment5
+              a = 1 AND b = 2 --comment6
+              -- and c = 1
+            -- comment7
+            ;
+            """,
+            """/* comment4 */
+CREATE TABLE db.tba AS
+SELECT
+  a,
+  b,
+  c
+FROM tb_01
+WHERE
+  a /* comment5 */ = 1 AND b = 2 /* comment6 */ /* and c = 1 */ /* comment7 */""",
+            pretty=True,
+        )
+        self.validate(
+            """
+            SELECT
+               -- This is testing comments
+                col,
+            -- 2nd testing comments
+            CASE WHEN a THEN b ELSE c END as d
+            FROM t
+            """,
+            """SELECT
+  col, /* This is testing comments */
+  CASE WHEN a THEN b ELSE c END /* 2nd testing comments */ AS d
+FROM t""",
+            pretty=True,
+        )
+        self.validate(
+            """
+            SELECT * FROM a
+            -- comments
+            INNER JOIN b
+            """,
+            """SELECT
+  *
+FROM a
+/* comments */
+INNER JOIN b""",
+            pretty=True,
+        )
+        self.validate(
+            "SELECT * FROM a LEFT /* comment 1 */ OUTER /* comment 2 */ JOIN b",
+            """SELECT
+  *
+FROM a
+/* comment 1 */ /* comment 2 */
+LEFT OUTER JOIN b""",
+            pretty=True,
+        )
+        self.validate(
+            "SELECT\n  a /* sqlglot.meta case_sensitive */ -- noqa\nFROM tbl",
+            """SELECT
+  a /* sqlglot.meta case_sensitive */ /* noqa */
+FROM tbl""",
+            pretty=True,
+        )
+        self.validate(
+            """
+SELECT
+  'hotel1' AS hotel,
+  *
+FROM dw_1_dw_1_1.exactonline_1.transactionlines
+/*
+    UNION ALL
+    SELECT
+      'Thon Partner Hotel Jølster' AS hotel,
+      name,
+      date,
+      CAST(identifier AS VARCHAR) AS identifier,
+      value
+    FROM d2o_889_oupjr_1348.public.accountvalues_forecast
+*/
+UNION ALL
+SELECT
+  'hotel2' AS hotel,
+  *
+FROM dw_1_dw_1_1.exactonline_2.transactionlines""",
+            """SELECT
+  'hotel1' AS hotel,
+  *
+FROM dw_1_dw_1_1.exactonline_1.transactionlines /*
+    UNION ALL
+    SELECT
+      'Thon Partner Hotel Jølster' AS hotel,
+      name,
+      date,
+      CAST(identifier AS VARCHAR) AS identifier,
+      value
+    FROM d2o_889_oupjr_1348.public.accountvalues_forecast
+*/
+UNION ALL
+SELECT
+  'hotel2' AS hotel,
+  *
+FROM dw_1_dw_1_1.exactonline_2.transactionlines""",
+            pretty=True,
+        )
 
     def test_types(self):
         self.validate("INT 1", "CAST(1 AS INT)")
@@ -295,11 +444,13 @@ FROM v""",
         self.validate("x::INT y", "CAST(x AS INT) AS y")
         self.validate("x::INT AS y", "CAST(x AS INT) AS y")
         self.validate("x::INT::BOOLEAN", "CAST(CAST(x AS INT) AS BOOLEAN)")
+        self.validate("interval::int", "CAST(interval AS INT)")
+        self.validate("x::user_defined_type", "CAST(x AS user_defined_type)")
         self.validate("CAST(x::INT AS BOOLEAN)", "CAST(CAST(x AS INT) AS BOOLEAN)")
         self.validate("CAST(x AS INT)::BOOLEAN", "CAST(CAST(x AS INT) AS BOOLEAN)")
 
         with self.assertRaises(ParseError):
-            transpile("x::z")
+            transpile("x::z", read="duckdb")
 
     def test_not_range(self):
         self.validate("a NOT LIKE b", "NOT a LIKE b")
@@ -371,12 +522,12 @@ FROM v""",
             "ALTER TABLE integers ADD COLUMN k INT",
         )
         self.validate(
-            "ALTER TABLE integers ALTER i SET DATA TYPE VARCHAR",
-            "ALTER TABLE integers ALTER COLUMN i TYPE VARCHAR",
+            "ALTER TABLE integers ALTER i TYPE VARCHAR",
+            "ALTER TABLE integers ALTER COLUMN i SET DATA TYPE VARCHAR",
         )
         self.validate(
             "ALTER TABLE integers ALTER i TYPE VARCHAR COLLATE foo USING bar",
-            "ALTER TABLE integers ALTER COLUMN i TYPE VARCHAR COLLATE foo USING bar",
+            "ALTER TABLE integers ALTER COLUMN i SET DATA TYPE VARCHAR COLLATE foo USING bar",
         )
 
     def test_time(self):
@@ -507,7 +658,7 @@ FROM v""",
         self.validate(
             "CREATE TEMPORARY TABLE test AS SELECT 1",
             "CREATE TEMPORARY VIEW test AS SELECT 1",
-            write="spark",
+            write="spark2",
         )
 
     @mock.patch("sqlglot.helper.logger")

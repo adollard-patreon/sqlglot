@@ -5,7 +5,6 @@ import typing as t
 import sqlglot
 from sqlglot import expressions as exp
 from sqlglot.dataframe.sql.types import DataType
-from sqlglot.dialects import Spark
 from sqlglot.helper import flatten, is_iterable
 
 if t.TYPE_CHECKING:
@@ -15,19 +14,20 @@ if t.TYPE_CHECKING:
 
 class Column:
     def __init__(self, expression: t.Optional[t.Union[ColumnOrLiteral, exp.Expression]]):
+        from sqlglot.dataframe.sql.session import SparkSession
+
         if isinstance(expression, Column):
             expression = expression.expression  # type: ignore
         elif expression is None or not isinstance(expression, (str, exp.Expression)):
             expression = self._lit(expression).expression  # type: ignore
-
-        expression = sqlglot.maybe_parse(expression, dialect="spark")
+        elif not isinstance(expression, exp.Column):
+            expression = sqlglot.maybe_parse(expression, dialect=SparkSession().dialect).transform(
+                SparkSession().dialect.normalize_identifier, copy=False
+            )
         if expression is None:
             raise ValueError(f"Could not parse {expression}")
 
-        if isinstance(expression, exp.Column):
-            expression.transform(Spark.normalize_identifier, copy=False)
-
-        self.expression: exp.Expression = expression
+        self.expression: exp.Expression = expression  # type: ignore
 
     def __repr__(self):
         return repr(self.expression)
@@ -114,7 +114,7 @@ class Column:
         return self.inverse_binary_op(exp.Or, other)
 
     @classmethod
-    def ensure_col(cls, value: t.Optional[t.Union[ColumnOrLiteral, exp.Expression]]):
+    def ensure_col(cls, value: t.Optional[t.Union[ColumnOrLiteral, exp.Expression]]) -> Column:
         return cls(value)
 
     @classmethod
@@ -207,10 +207,20 @@ class Column:
         return Column(expression)
 
     def sql(self, **kwargs) -> str:
-        return self.expression.sql(**{"dialect": "spark", **kwargs})
+        from sqlglot.dataframe.sql.session import SparkSession
+
+        return self.expression.sql(**{"dialect": SparkSession().dialect, **kwargs})
 
     def alias(self, name: str) -> Column:
-        new_expression = exp.alias_(self.column_expression, name)
+        from sqlglot.dataframe.sql.session import SparkSession
+
+        dialect = SparkSession().dialect
+        alias: exp.Expression = sqlglot.maybe_parse(name, dialect=dialect)
+        new_expression = exp.alias_(
+            self.column_expression,
+            alias.this if isinstance(alias, exp.Column) else name,
+            dialect=dialect,
+        )
         return Column(new_expression)
 
     def asc(self) -> Column:
@@ -259,14 +269,16 @@ class Column:
         new_expression = exp.Not(this=exp.Is(this=self.column_expression, expression=exp.Null()))
         return Column(new_expression)
 
-    def cast(self, dataType: t.Union[str, DataType]):
+    def cast(self, dataType: t.Union[str, DataType]) -> Column:
         """
         Functionality Difference: PySpark cast accepts a datatype instance of the datatype class
         Sqlglot doesn't currently replicate this class so it only accepts a string
         """
+        from sqlglot.dataframe.sql.session import SparkSession
+
         if isinstance(dataType, DataType):
             dataType = dataType.simpleString()
-        return Column(exp.cast(self.column_expression, dataType, dialect="spark"))
+        return Column(exp.cast(self.column_expression, dataType, dialect=SparkSession().dialect))
 
     def startswith(self, value: t.Union[str, Column]) -> Column:
         value = self._lit(value) if not isinstance(value, Column) else value

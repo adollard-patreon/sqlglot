@@ -3,12 +3,21 @@ from __future__ import annotations
 import typing as t
 
 from sqlglot import exp, generator, parser, tokens, transforms
-from sqlglot.dialects.dialect import Dialect, no_ilike_sql, rename_func, trim_sql
+from sqlglot.dialects.dialect import (
+    Dialect,
+    format_time_lambda,
+    no_ilike_sql,
+    rename_func,
+    trim_sql,
+)
 from sqlglot.helper import seq_get
 from sqlglot.tokens import TokenType
 
+if t.TYPE_CHECKING:
+    from sqlglot._typing import E
 
-def _parse_xml_table(self: parser.Parser) -> exp.XMLTable:
+
+def _parse_xml_table(self: Oracle.Parser) -> exp.XMLTable:
     this = self._parse_string()
 
     passing = None
@@ -22,13 +31,18 @@ def _parse_xml_table(self: parser.Parser) -> exp.XMLTable:
     by_ref = self._match_text_seq("RETURNING", "SEQUENCE", "BY", "REF")
 
     if self._match_text_seq("COLUMNS"):
-        columns = self._parse_csv(lambda: self._parse_column_def(self._parse_field(any_token=True)))
+        columns = self._parse_csv(self._parse_field_def)
 
     return self.expression(exp.XMLTable, this=this, passing=passing, columns=columns, by_ref=by_ref)
 
 
 class Oracle(Dialect):
     ALIAS_POST_TABLESAMPLE = True
+    LOCKING_READS_SUPPORTED = True
+
+    # See section 8: https://docs.oracle.com/cd/A97630_01/server.920/a96540/sql_elements9a.htm
+    RESOLVES_IDENTIFIERS_AS_UPPERCASE = True
+    ALTER_TABLE_ADD_COLUMN_KEYWORD = False
 
     # https://docs.oracle.com/database/121/SQLRF/sql_elements004.htm#SQLRF00212
     # https://docs.python.org/3/library/datetime.html#strftime-and-strptime-format-codes
@@ -62,10 +76,20 @@ class Oracle(Dialect):
         FUNCTIONS = {
             **parser.Parser.FUNCTIONS,
             "SQUARE": lambda args: exp.Pow(this=seq_get(args, 0), expression=exp.Literal.number(2)),
+            "TO_CHAR": format_time_lambda(exp.TimeToStr, "oracle", default=True),
         }
 
         FUNCTION_PARSERS: t.Dict[str, t.Callable] = {
             **parser.Parser.FUNCTION_PARSERS,
+            "JSON_ARRAY": lambda self: self._parse_json_array(
+                exp.JSONArray,
+                expressions=self._parse_csv(lambda: self._parse_format_json(self._parse_bitwise())),
+            ),
+            "JSON_ARRAYAGG": lambda self: self._parse_json_array(
+                exp.JSONArrayAgg,
+                this=self._parse_format_json(self._parse_bitwise()),
+                order=self._parse_order(),
+            ),
             "XMLTABLE": _parse_xml_table,
         }
 
@@ -74,6 +98,19 @@ class Oracle(Dialect):
                 exp.DateStrToDate, this=this
             )
         }
+
+        # SELECT UNIQUE .. is old-style Oracle syntax for SELECT DISTINCT ..
+        # Reference: https://stackoverflow.com/a/336455
+        DISTINCT_TOKENS = {TokenType.DISTINCT, TokenType.UNIQUE}
+
+        def _parse_json_array(self, expr_type: t.Type[E], **kwargs) -> E:
+            return self.expression(
+                expr_type,
+                null_handling=self._parse_on_handling("NULL", "NULL", "ABSENT"),
+                return_type=self._match_text_seq("RETURNING") and self._parse_type(),
+                strict=self._match_text_seq("STRICT"),
+                **kwargs,
+            )
 
         def _parse_column(self) -> t.Optional[exp.Expression]:
             column = super()._parse_column()
@@ -100,6 +137,8 @@ class Oracle(Dialect):
         JOIN_HINTS = False
         TABLE_HINTS = False
         COLUMN_JOIN_MARKS_SUPPORTED = True
+        DATA_TYPE_SPECIFIERS_ALLOWED = True
+        ALTER_TABLE_ADD_COLUMN_KEYWORD = False
 
         LIMIT_FETCH = "FETCH"
 
@@ -126,8 +165,12 @@ class Oracle(Dialect):
             ),
             exp.Group: transforms.preprocess([transforms.unalias_group]),
             exp.ILike: no_ilike_sql,
-            exp.Coalesce: rename_func("NVL"),
-            exp.Select: transforms.preprocess([transforms.eliminate_distinct_on]),
+            exp.Select: transforms.preprocess(
+                [
+                    transforms.eliminate_distinct_on,
+                    transforms.eliminate_qualify,
+                ]
+            ),
             exp.StrToTime: lambda self, e: f"TO_TIMESTAMP({self.sql(e, 'this')}, {self.format_time(e)})",
             exp.Subquery: lambda self, e: self.subquery_sql(e, sep=" "),
             exp.Substring: rename_func("SUBSTR"),
@@ -158,8 +201,14 @@ class Oracle(Dialect):
             )
             return f"XMLTABLE({self.sep('')}{self.indent(this + passing + by_ref + columns)}{self.seg(')', sep='')}"
 
+        def add_column_sql(self, expression: exp.AlterTable) -> str:
+            actions = self.expressions(expression, key="actions", flat=True)
+            if len(expression.args.get("actions", [])) > 1:
+                return f"ADD ({actions})"
+            return f"ADD {actions}"
+
     class Tokenizer(tokens.Tokenizer):
-        VAR_SINGLE_TOKENS = {"@"}
+        VAR_SINGLE_TOKENS = {"@", "$", "#"}
 
         KEYWORDS = {
             **tokens.Tokenizer.KEYWORDS,

@@ -7,28 +7,57 @@ class TestHive(Validator):
     def test_bits(self):
         self.validate_all(
             "x & 1",
-            write={
+            read={
                 "duckdb": "x & 1",
                 "presto": "BITWISE_AND(x, 1)",
+                "spark": "x & 1",
+            },
+            write={
+                "duckdb": "x & 1",
                 "hive": "x & 1",
+                "presto": "BITWISE_AND(x, 1)",
                 "spark": "x & 1",
             },
         )
         self.validate_all(
-            "~x",
+            "x & 1 > 0",
+            read={
+                "duckdb": "x & 1 > 0",
+                "presto": "BITWISE_AND(x, 1) > 0",
+                "spark": "x & 1 > 0",
+            },
             write={
+                "duckdb": "x & 1 > 0",
+                "presto": "BITWISE_AND(x, 1) > 0",
+                "hive": "x & 1 > 0",
+                "spark": "x & 1 > 0",
+            },
+        )
+        self.validate_all(
+            "~x",
+            read={
                 "duckdb": "~x",
                 "presto": "BITWISE_NOT(x)",
+                "spark": "~x",
+            },
+            write={
+                "duckdb": "~x",
                 "hive": "~x",
+                "presto": "BITWISE_NOT(x)",
                 "spark": "~x",
             },
         )
         self.validate_all(
             "x | 1",
-            write={
+            read={
                 "duckdb": "x | 1",
                 "presto": "BITWISE_OR(x, 1)",
+                "spark": "x | 1",
+            },
+            write={
+                "duckdb": "x | 1",
                 "hive": "x | 1",
+                "presto": "BITWISE_OR(x, 1)",
                 "spark": "x | 1",
             },
         )
@@ -54,15 +83,6 @@ class TestHive(Validator):
                 "presto": "BITWISE_ARITHMETIC_SHIFT_RIGHT(x, 1)",
                 "hive": "x >> 1",
                 "spark": "SHIFTRIGHT(x, 1)",
-            },
-        )
-        self.validate_all(
-            "x & 1 > 0",
-            write={
-                "duckdb": "x & 1 > 0",
-                "presto": "BITWISE_AND(x, 1) > 0",
-                "hive": "x & 1 > 0",
-                "spark": "x & 1 > 0",
             },
         )
 
@@ -362,14 +382,22 @@ class TestHive(Validator):
         self.validate_all(
             "SELECT fname, lname, age FROM person ORDER BY age DESC NULLS FIRST, fname ASC NULLS LAST, lname",
             write={
-                "duckdb": "SELECT fname, lname, age FROM person ORDER BY age DESC NULLS FIRST, fname, lname NULLS FIRST",
-                "presto": "SELECT fname, lname, age FROM person ORDER BY age DESC NULLS FIRST, fname, lname NULLS FIRST",
-                "hive": "SELECT fname, lname, age FROM person ORDER BY age DESC NULLS FIRST, fname NULLS LAST, lname",
-                "spark": "SELECT fname, lname, age FROM person ORDER BY age DESC NULLS FIRST, fname NULLS LAST, lname",
+                "duckdb": "SELECT fname, lname, age FROM person ORDER BY age DESC NULLS FIRST, fname ASC, lname NULLS FIRST",
+                "presto": "SELECT fname, lname, age FROM person ORDER BY age DESC NULLS FIRST, fname ASC, lname NULLS FIRST",
+                "hive": "SELECT fname, lname, age FROM person ORDER BY age DESC NULLS FIRST, fname ASC NULLS LAST, lname",
+                "spark": "SELECT fname, lname, age FROM person ORDER BY age DESC NULLS FIRST, fname ASC NULLS LAST, lname",
             },
         )
 
     def test_hive(self):
+        self.validate_identity("SELECT * FROM my_table TIMESTAMP AS OF DATE_ADD(CURRENT_DATE, -1)")
+        self.validate_identity("SELECT * FROM my_table VERSION AS OF DATE_ADD(CURRENT_DATE, -1)")
+
+        self.validate_identity(
+            "SELECT ROW() OVER (DISTRIBUTE BY x SORT BY y)",
+            "SELECT ROW() OVER (PARTITION BY x ORDER BY y)",
+        )
+        self.validate_identity("SELECT transform")
         self.validate_identity("SELECT * FROM test DISTRIBUTE BY y SORT BY x DESC ORDER BY l")
         self.validate_identity(
             "SELECT * FROM test WHERE RAND() <= 0.1 DISTRIBUTE BY RAND() SORT BY RAND()"
@@ -400,6 +428,21 @@ class TestHive(Validator):
         )
         self.validate_identity(
             "SELECT key, value, GROUPING__ID, COUNT(*) FROM T1 GROUP BY key, value WITH ROLLUP"
+        )
+
+        self.validate_all(
+            "SET hiveconf:some_var = 5",
+            write={
+                "hive": "SET hiveconf:some_var = 5",
+                "spark": "SET hiveconf:some_var = 5",
+            },
+        )
+        self.validate_all(
+            "SELECT ${hiveconf:some_var}",
+            write={
+                "hive": "SELECT ${hiveconf:some_var}",
+                "spark": "SELECT ${hiveconf:some_var}",
+            },
         )
         self.validate_all(
             "SELECT A.1a AS b FROM test_a AS A",
@@ -570,7 +613,7 @@ class TestHive(Validator):
             read={
                 "": "VAR_MAP(a, b, c, d)",
                 "clickhouse": "map(a, b, c, d)",
-                "duckdb": "MAP(LIST_VALUE(a, c), LIST_VALUE(b, d))",
+                "duckdb": "MAP([a, c], [b, d])",
                 "hive": "MAP(a, b, c, d)",
                 "presto": "MAP(ARRAY[a, c], ARRAY[b, d])",
                 "spark": "MAP(a, b, c, d)",
@@ -578,7 +621,7 @@ class TestHive(Validator):
             write={
                 "": "MAP(ARRAY(a, c), ARRAY(b, d))",
                 "clickhouse": "map(a, b, c, d)",
-                "duckdb": "MAP(LIST_VALUE(a, c), LIST_VALUE(b, d))",
+                "duckdb": "MAP([a, c], [b, d])",
                 "presto": "MAP(ARRAY[a, c], ARRAY[b, d])",
                 "hive": "MAP(a, b, c, d)",
                 "spark": "MAP(a, b, c, d)",
@@ -588,7 +631,7 @@ class TestHive(Validator):
         self.validate_all(
             "MAP(a, b)",
             write={
-                "duckdb": "MAP(LIST_VALUE(a), LIST_VALUE(b))",
+                "duckdb": "MAP([a], [b])",
                 "presto": "MAP(ARRAY[a], ARRAY[b])",
                 "hive": "MAP(a, b)",
                 "spark": "MAP(a, b)",
@@ -644,7 +687,7 @@ class TestHive(Validator):
             "x div y",
             write={
                 "duckdb": "x // y",
-                "presto": "CAST(x / y AS INTEGER)",
+                "presto": "CAST(CAST(x AS DOUBLE) / y AS INTEGER)",
                 "hive": "CAST(x / y AS INT)",
                 "spark": "CAST(x / y AS INT)",
             },
@@ -664,11 +707,15 @@ class TestHive(Validator):
         self.validate_all(
             "COLLECT_SET(x)",
             read={
+                "doris": "COLLECT_SET(x)",
                 "presto": "SET_AGG(x)",
+                "snowflake": "ARRAY_UNIQUE_AGG(x)",
             },
             write={
-                "presto": "SET_AGG(x)",
+                "doris": "COLLECT_SET(x)",
                 "hive": "COLLECT_SET(x)",
+                "presto": "SET_AGG(x)",
+                "snowflake": "ARRAY_UNIQUE_AGG(x)",
                 "spark": "COLLECT_SET(x)",
             },
         )
@@ -696,9 +743,7 @@ class TestHive(Validator):
         self.validate_identity("'\\\\n'")
         self.validate_identity("''")
         self.validate_identity("'\\\\'")
-        self.validate_identity("'\z'")
         self.validate_identity("'\\z'")
-        self.validate_identity("'\\\z'")
         self.validate_identity("'\\\\z'")
 
     def test_data_type(self):

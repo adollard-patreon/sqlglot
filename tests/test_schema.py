@@ -238,3 +238,42 @@ class TestSchema(unittest.TestCase):
         schema = MappingSchema(schema={"Foo": {"`BaR`": "int"}}, dialect="bigquery")
         self.assertEqual(schema.column_names("Foo"), ["bar"])
         self.assertEqual(schema.column_names("foo"), [])
+
+        # Check that the schema's normalization setting can be overridden
+        schema = MappingSchema(schema={"X": {"y": "int"}}, normalize=False, dialect="snowflake")
+        self.assertEqual(schema.column_names("x", normalize=True), ["y"])
+
+    def test_same_number_of_qualifiers(self):
+        schema = MappingSchema({"x": {"y": {"c1": "int"}}})
+
+        with self.assertRaises(SchemaError) as ctx:
+            schema.add_table("z", {"c2": "int"})
+
+        self.assertEqual(
+            str(ctx.exception),
+            "Table z must match the schema's nesting level: 2.",
+        )
+
+        schema = MappingSchema()
+        schema.add_table("x.y", {"c1": "int"})
+
+        with self.assertRaises(SchemaError) as ctx:
+            schema.add_table("z", {"c2": "int"})
+
+        self.assertEqual(
+            str(ctx.exception),
+            "Table z must match the schema's nesting level: 2.",
+        )
+
+        with self.assertRaises(SchemaError) as ctx:
+            MappingSchema({"x": {"y": {"c1": "int"}}, "z": {"c2": "int"}})
+
+        self.assertEqual(
+            str(ctx.exception),
+            "Table z must match the schema's nesting level: 2.",
+        )
+
+    def test_has_column(self):
+        schema = MappingSchema({"x": {"c": "int"}})
+        self.assertTrue(schema.has_column("x", exp.column("c")))
+        self.assertFalse(schema.has_column("x", exp.column("k")))

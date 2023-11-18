@@ -43,6 +43,9 @@ TRUE;
 1.0 = 1;
 TRUE;
 
+CAST('2023-01-01' AS DATE) = CAST('2023-01-01' AS DATE);
+TRUE;
+
 'x' = 'y';
 FALSE;
 
@@ -240,8 +243,17 @@ A AND B AND C;
 SELECT x WHERE TRUE;
 SELECT x;
 
-SELECT x FROM y LEFT JOIN z ON TRUE;
+SELECT x FROM y JOIN z ON TRUE;
 SELECT x FROM y CROSS JOIN z;
+
+SELECT x FROM y RIGHT JOIN z ON TRUE;
+SELECT x FROM y CROSS JOIN z;
+
+SELECT x FROM y LEFT JOIN z ON TRUE;
+SELECT x FROM y LEFT JOIN z ON TRUE;
+
+SELECT x FROM y FULL OUTER JOIN z ON TRUE;
+SELECT x FROM y FULL OUTER JOIN z ON TRUE;
 
 SELECT x FROM y JOIN z USING (x);
 SELECT x FROM y JOIN z USING (x);
@@ -254,6 +266,9 @@ TRUE;
 
 (FALSE);
 FALSE;
+
+((TRUE));
+TRUE;
 
 (FALSE OR TRUE);
 TRUE;
@@ -278,6 +293,9 @@ x = y AND z;
 
 x * (1 - y);
 x * (1 - y);
+
+(((x % 20) = 0) = TRUE);
+((x % 20) = 0) = TRUE;
 
 --------------------------------------
 -- Literals
@@ -399,6 +417,9 @@ FALSE;
 1 IS NOT NULL;
 TRUE;
 
+date '1998-12-01' - interval x day;
+CAST('1998-12-01' AS DATE) - INTERVAL x day;
+
 date '1998-12-01' - interval '90' day;
 CAST('1998-09-02' AS DATE);
 
@@ -428,6 +449,27 @@ CAST('1998-09-02 00:00:00' AS DATETIME);
 
 CAST(x AS DATETIME) + interval '1' week;
 CAST(x AS DATETIME) + INTERVAL '1' week;
+
+TS_OR_DS_TO_DATE('1998-12-01 00:00:01') - interval '90' day;
+CAST('1998-09-02' AS DATE);
+
+DATE_ADD(CAST('2023-01-02' AS DATE), -2, 'MONTH');
+CAST('2022-11-02' AS DATE);
+
+DATE_SUB(CAST('2023-01-02' AS DATE), 1 + 1, 'DAY');
+CAST('2022-12-31' AS DATE);
+
+DATE_ADD(CAST('2023-01-02' AS DATETIME), -2, 'HOUR');
+CAST('2023-01-01 22:00:00' AS DATETIME);
+
+DATETIME_ADD(CAST('2023-01-02' AS DATETIME), -2, 'HOUR');
+CAST('2023-01-01 22:00:00' AS DATETIME);
+
+DATETIME_SUB(CAST('2023-01-02' AS DATETIME), 1 + 1, 'HOUR');
+CAST('2023-01-01 22:00:00' AS DATETIME);
+
+DATE_ADD(x, 1, 'MONTH');
+DATE_ADD(x, 1, 'MONTH');
 
 --------------------------------------
 -- Comparisons
@@ -602,3 +644,379 @@ TRUE;
 
 x = 2018 OR x <> 2018;
 x <> 2018 OR x = 2018;
+
+t0.x = t1.x AND t0.y < t1.y AND t0.y <= t1.y;
+t0.x = t1.x AND t0.y < t1.y AND t0.y <= t1.y;
+
+--------------------------------------
+-- COALESCE
+--------------------------------------
+COALESCE(x);
+x;
+
+COALESCE(x, 1) = 2;
+NOT x IS NULL AND x = 2;
+
+2 = COALESCE(x, 1);
+2 = x AND NOT x IS NULL;
+
+COALESCE(x, 1, 1) = 1 + 1;
+NOT x IS NULL AND x = 2;
+
+COALESCE(x, 1, 2) = 2;
+NOT x IS NULL AND x = 2;
+
+COALESCE(x, 3) <= 2;
+NOT x IS NULL AND x <= 2;
+
+COALESCE(x, 1) <> 2;
+x <> 2 OR x IS NULL;
+
+COALESCE(x, 1) <= 2;
+x <= 2 OR x IS NULL;
+
+COALESCE(x, 1) = 1;
+x = 1 OR x IS NULL;
+
+COALESCE(x, 1) IS NULL;
+FALSE;
+
+COALESCE(ROW() OVER (), 1) = 1;
+ROW() OVER () = 1 OR ROW() OVER () IS NULL;
+
+a AND b AND COALESCE(ROW() OVER (), 1) = 1;
+a AND b AND (ROW() OVER () = 1 OR ROW() OVER () IS NULL);
+
+COALESCE(1, 2);
+1;
+
+COALESCE(CAST(CAST('2023-01-01' AS TIMESTAMP) AS DATE), x);
+CAST(CAST('2023-01-01' AS TIMESTAMP) AS DATE);
+
+COALESCE(CAST(NULL AS DATE), x);
+COALESCE(CAST(NULL AS DATE), x);
+
+--------------------------------------
+-- CONCAT
+--------------------------------------
+CONCAT(x, y);
+CONCAT(x, y);
+
+CONCAT_WS(sep, x, y);
+CONCAT_WS(sep, x, y);
+
+CONCAT(x);
+x;
+
+CONCAT('a', 'b', 'c');
+'abc';
+
+CONCAT('a', NULL);
+CONCAT('a', NULL);
+
+CONCAT_WS('-', 'a', 'b', 'c');
+'a-b-c';
+
+CONCAT('a', x, y, 'b', 'c');
+CONCAT('a', x, y, 'bc');
+
+CONCAT_WS('-', 'a', x, y, 'b', 'c');
+CONCAT_WS('-', 'a', x, y, 'b-c');
+
+'a' || 'b';
+'ab';
+
+CONCAT_WS('-', 'a');
+'a';
+
+CONCAT_WS('-', x, y);
+CONCAT_WS('-', x, y);
+
+CONCAT_WS('', x, y);
+CONCAT_WS('', x, y);
+
+CONCAT_WS('-', x);
+CONCAT_WS('-', x);
+
+CONCAT_WS(sep, 'a', 'b');
+CONCAT_WS(sep, 'a', 'b');
+
+'a' || 'b' || x;
+CONCAT('ab', x);
+
+CONCAT(a, b) IN (SELECT * FROM foo WHERE cond);
+CONCAT(a, b) IN (SELECT * FROM foo WHERE cond);
+
+--------------------------------------
+-- DATE_TRUNC
+--------------------------------------
+DATE_TRUNC('year', x) = CAST('2021-01-01' AS DATE);
+x < CAST('2022-01-01' AS DATE) AND x >= CAST('2021-01-01' AS DATE);
+
+DATE_TRUNC('quarter', x) = CAST('2021-01-01' AS DATE);
+x < CAST('2021-04-01' AS DATE) AND x >= CAST('2021-01-01' AS DATE);
+
+DATE_TRUNC('month', x) = CAST('2021-01-01' AS DATE);
+x < CAST('2021-02-01' AS DATE) AND x >= CAST('2021-01-01' AS DATE);
+
+DATE_TRUNC('week', x) = CAST('2021-01-04' AS DATE);
+x < CAST('2021-01-11' AS DATE) AND x >= CAST('2021-01-04' AS DATE);
+
+DATE_TRUNC('day', x) = CAST('2021-01-01' AS DATE);
+x < CAST('2021-01-02' AS DATE) AND x >= CAST('2021-01-01' AS DATE);
+
+CAST('2021-01-01' AS DATE) = DATE_TRUNC('year', x);
+x < CAST('2022-01-01' AS DATE) AND x >= CAST('2021-01-01' AS DATE);
+
+-- Always false, except for nulls
+DATE_TRUNC('quarter', x) = CAST('2021-01-02' AS DATE);
+DATE_TRUNC('quarter', x) = CAST('2021-01-02' AS DATE);
+
+DATE_TRUNC('year', x) <> CAST('2021-01-01' AS DATE);
+x < CAST('2021-01-01' AS DATE) AND x >= CAST('2022-01-01' AS DATE);
+
+-- Always true, except for nulls
+DATE_TRUNC('year', x) <> CAST('2021-01-02' AS DATE);
+DATE_TRUNC('year', x) <> CAST('2021-01-02' AS DATE);
+
+DATE_TRUNC('year', x) <= CAST('2021-01-01' AS DATE);
+x < CAST('2022-01-01' AS DATE);
+
+DATE_TRUNC('year', x) <= CAST('2021-01-02' AS DATE);
+x < CAST('2022-01-01' AS DATE);
+
+CAST('2021-01-01' AS DATE) >= DATE_TRUNC('year', x);
+x < CAST('2022-01-01' AS DATE);
+
+DATE_TRUNC('year', x) < CAST('2021-01-01' AS DATE);
+x < CAST('2021-01-01' AS DATE);
+
+DATE_TRUNC('year', x) < CAST('2021-01-02' AS DATE);
+x < CAST('2021-01-01' AS DATE);
+
+DATE_TRUNC('year', x) >= CAST('2021-01-01' AS DATE);
+x >= CAST('2021-01-01' AS DATE);
+
+DATE_TRUNC('year', x) >= CAST('2021-01-02' AS DATE);
+x >= CAST('2022-01-01' AS DATE);
+
+DATE_TRUNC('year', x) > CAST('2021-01-01' AS DATE);
+x >= CAST('2022-01-01' AS DATE);
+
+DATE_TRUNC('year', x) > CAST('2021-01-02' AS DATE);
+x >= CAST('2022-01-01' AS DATE);
+
+DATE_TRUNC('year', x) > TS_OR_DS_TO_DATE(TS_OR_DS_TO_DATE('2021-01-02'));
+x >= CAST('2022-01-01' AS DATE);
+
+DATE_TRUNC('year', x) > TS_OR_DS_TO_DATE(TS_OR_DS_TO_DATE('2021-01-02', '%Y'));
+DATE_TRUNC('year', x) > TS_OR_DS_TO_DATE(TS_OR_DS_TO_DATE('2021-01-02', '%Y'));
+
+-- right is not a date
+DATE_TRUNC('year', x) <> '2021-01-02';
+DATE_TRUNC('year', x) <> '2021-01-02';
+
+DATE_TRUNC('year', x) IN (CAST('2021-01-01' AS DATE), CAST('2023-01-01' AS DATE));
+(x < CAST('2022-01-01' AS DATE) AND x >= CAST('2021-01-01' AS DATE)) OR (x < CAST('2024-01-01' AS DATE) AND x >= CAST('2023-01-01' AS DATE));
+
+-- merge ranges
+DATE_TRUNC('year', x) IN (CAST('2021-01-01' AS DATE), CAST('2022-01-01' AS DATE));
+x < CAST('2023-01-01' AS DATE) AND x >= CAST('2021-01-01' AS DATE);
+
+-- one of the values will always be false
+DATE_TRUNC('year', x) IN (CAST('2021-01-01' AS DATE), CAST('2022-01-02' AS DATE));
+x < CAST('2022-01-01' AS DATE) AND x >= CAST('2021-01-01' AS DATE);
+
+TIMESTAMP_TRUNC(x, YEAR) = CAST('2021-01-01' AS DATETIME);
+x < CAST('2022-01-01 00:00:00' AS DATETIME) AND x >= CAST('2021-01-01 00:00:00' AS DATETIME);
+
+-- right side is not a date literal
+DATE_TRUNC('day', x) = CAST(y AS DATE);
+DATE_TRUNC('day', x) = CAST(y AS DATE);
+
+-- nested cast
+DATE_TRUNC('day', x) = CAST(CAST('2021-01-01 01:02:03' AS DATETIME) AS DATE);
+x < CAST('2021-01-02' AS DATE) AND x >= CAST('2021-01-01' AS DATE);
+
+TIMESTAMP_TRUNC(x, YEAR) = CAST(CAST('2021-01-01 01:02:03' AS DATE) AS DATETIME);
+x < CAST('2022-01-01 00:00:00' AS DATETIME) AND x >= CAST('2021-01-01 00:00:00' AS DATETIME);
+
+--------------------------------------
+-- EQUALITY
+--------------------------------------
+x + 1 = 3;
+x = 2;
+
+1 + x = 3;
+x = 2;
+
+3 = x + 1;
+x = 2;
+
+x - 1 = 3;
+x = 4;
+
+x + 1 > 3;
+x > 2;
+
+x + 1 >= 3;
+x >= 2;
+
+x + 1 <= 3;
+x <= 2;
+
+x + 1 <= 3;
+x <= 2;
+
+x + 1 <> 3;
+x <> 2;
+
+1 + x + 1 = 3 + 1;
+x = 2;
+
+x - INTERVAL 1 DAY = CAST('2021-01-01' AS DATE);
+x = CAST('2021-01-02' AS DATE);
+
+x - INTERVAL 1 DAY = TS_OR_DS_TO_DATE('2021-01-01 00:00:01');
+x = CAST('2021-01-02' AS DATE);
+
+x - INTERVAL 1 HOUR > CAST('2021-01-01' AS DATETIME);
+x > CAST('2021-01-01 01:00:00' AS DATETIME);
+
+DATETIME_ADD(x, 1, HOUR) < CAST('2021-01-01' AS DATETIME);
+x < CAST('2020-12-31 23:00:00' AS DATETIME);
+
+DATETIME_SUB(x, 1, DAY) >= CAST('2021-01-01' AS DATETIME);
+x >= CAST('2021-01-02 00:00:00' AS DATETIME);
+
+DATE_ADD(x, 1, DAY) <= CAST('2021-01-01' AS DATE);
+x <= CAST('2020-12-31' AS DATE);
+
+DATE_SUB(x, 1, DAY) <> CAST('2021-01-01' AS DATE);
+x <> CAST('2021-01-02' AS DATE);
+
+DATE_ADD(DATE_ADD(DATE_TRUNC('week', DATE_SUB(x, 1, DAY)), 1, DAY), 1, YEAR) < CAST('2021-01-08' AS DATE);
+x < CAST('2020-01-07' AS DATE);
+
+x - INTERVAL '1' day = CAST(y AS DATE);
+x - INTERVAL '1' day = CAST(y AS DATE);
+
+--------------------------------------
+-- Constant Propagation
+--------------------------------------
+x = 5 AND y = x;
+x = 5 AND y = 5;
+
+5 = x AND y = x;
+5 = x AND y = 5;
+
+x = 5 OR y = x;
+x = 5 OR y = x;
+
+(x = 5 AND y = x) OR y = 1;
+(x = 5 AND y = 5) OR y = 1;
+
+t.x = 5 AND y = x;
+t.x = 5 AND y = x;
+
+t.x = 'a' AND y = CONCAT_WS('-', t.x, 'b');
+t.x = 'a' AND y = 'a-b';
+
+x = 5 AND y = x AND y + 1 < 5;
+FALSE;
+
+x = 5 AND x = 6;
+FALSE;
+
+x = 5 AND (y = x OR z = 1);
+x = 5 AND (y = x OR z = 1);
+
+x = 5 AND x + 3 = 8;
+x = 5;
+
+x = 5 AND (SELECT x FROM t WHERE y = 1);
+(SELECT x FROM t WHERE y = 1) AND x = 5;
+
+x = 1 AND y > 0 AND (SELECT z = 5 FROM t WHERE y = 1);
+(SELECT z = 5 FROM t WHERE y = 1) AND x = 1 AND y > 0;
+
+x = 1 AND x = y AND (SELECT z FROM t WHERE a AND (b OR c));
+(SELECT z FROM t WHERE a AND (b OR c)) AND 1 = y AND x = 1;
+
+t1.a = 39 AND t2.b = t1.a AND t3.c = t2.b;
+t1.a = 39 AND t2.b = 39 AND t3.c = 39;
+
+x = 1 AND CASE WHEN x = 5 THEN FALSE ELSE TRUE END;
+x = 1;
+
+x = 1 AND IF(x = 5, FALSE, TRUE);
+x = 1;
+
+x = 1 AND CASE x WHEN 5 THEN FALSE ELSE TRUE END;
+x = 1;
+
+x = y AND CASE WHEN x = 5 THEN FALSE ELSE TRUE END;
+CASE WHEN x = 5 THEN FALSE ELSE TRUE END AND x = y;
+
+x = 1 AND CASE WHEN y = 5 THEN x = z END;
+CASE WHEN y = 5 THEN 1 = z END AND x = 1;
+
+--------------------------------------
+-- Simplify Conditionals
+--------------------------------------
+IF(TRUE, x, y);
+x;
+
+IF(FALSE, x, y);
+y;
+
+IF(FALSE, x);
+NULL;
+
+IF(NULL, x, y);
+y;
+
+IF(cond, x, y);
+CASE WHEN cond THEN x ELSE y END;
+
+CASE WHEN TRUE THEN x ELSE y END;
+x;
+
+CASE WHEN FALSE THEN x ELSE y END;
+y;
+
+CASE WHEN FALSE THEN x WHEN FALSE THEN y WHEN TRUE THEN z END;
+z;
+
+CASE NULL WHEN NULL THEN x ELSE y END;
+y;
+
+CASE 4 WHEN 1 THEN x WHEN 2 THEN y WHEN 3 THEN z ELSE w END;
+w;
+
+CASE 4 WHEN 1 THEN x WHEN 2 THEN y WHEN 3 THEN z WHEN 4 THEN w END;
+w;
+
+CASE WHEN value = 1 THEN x ELSE y END;
+CASE WHEN value = 1 THEN x ELSE y END;
+
+CASE WHEN FALSE THEN x END;
+NULL;
+
+CASE 1 WHEN 1 + 1 THEN x END;
+NULL;
+
+CASE WHEN cond THEN x ELSE y END;
+CASE WHEN cond THEN x ELSE y END;
+
+CASE WHEN cond THEN x END;
+CASE WHEN cond THEN x END;
+
+CASE x WHEN y THEN z ELSE w END;
+CASE WHEN x = y THEN z ELSE w END;
+
+CASE x WHEN y THEN z END;
+CASE WHEN x = y THEN z END;
+
+CASE x1 + x2 WHEN x3 THEN x4 WHEN x5 + x6 THEN x7 ELSE x8 END;
+CASE WHEN (x1 + x2) = x3 THEN x4 WHEN (x1 + x2) = (x5 + x6) THEN x7 ELSE x8 END;

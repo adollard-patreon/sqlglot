@@ -16,9 +16,6 @@ SELECT x.a AS a FROM x AS x JOIN (SELECT y.b AS b FROM y AS y) AS z ON x.b = z.b
 SELECT x1.a FROM (SELECT * FROM x) AS x1, (SELECT * FROM x) AS x2;
 SELECT x1.a AS a FROM (SELECT x.a AS a FROM x AS x) AS x1, (SELECT 1 AS _ FROM x AS x) AS x2;
 
-SELECT x1.a FROM (SELECT * FROM x) AS x1, (SELECT * FROM x) AS x2;
-SELECT x1.a AS a FROM (SELECT x.a AS a FROM x AS x) AS x1, (SELECT 1 AS _ FROM x AS x) AS x2;
-
 SELECT a FROM (SELECT DISTINCT a, b FROM x);
 SELECT _q_0.a AS a FROM (SELECT DISTINCT x.a AS a, x.b AS b FROM x AS x) AS _q_0;
 
@@ -64,6 +61,24 @@ SELECT i.a AS a FROM x AS i LEFT JOIN (SELECT _q_0.a AS a FROM (SELECT x.a AS a 
 WITH cte AS (SELECT source.a AS a, ROW_NUMBER() OVER (PARTITION BY source.id, source.timestamp ORDER BY source.a DESC) AS index FROM source AS source QUALIFY index) SELECT cte.a AS a FROM cte;
 WITH cte AS (SELECT source.a AS a FROM source AS source QUALIFY ROW_NUMBER() OVER (PARTITION BY source.id, source.timestamp ORDER BY source.a DESC)) SELECT cte.a AS a FROM cte;
 
+WITH cte AS (SELECT 1 AS x, 2 AS y, 3 AS z) SELECT cte.a FROM cte AS cte(a);
+WITH cte AS (SELECT 1 AS x) SELECT cte.a AS a FROM cte AS cte(a);
+
+WITH cte(x, y, z) AS (SELECT 1, 2, 3) SELECT a, z FROM cte AS cte(a);
+WITH cte AS (SELECT 1 AS x, 3 AS z) SELECT cte.a AS a, cte.z AS z FROM cte AS cte(a);
+
+WITH cte(x, y, z) AS (SELECT 1, 2, 3) SELECT a, z FROM (SELECT * FROM cte AS cte(b)) AS cte(a);
+WITH cte AS (SELECT 1 AS x, 3 AS z) SELECT cte.a AS a, cte.z AS z FROM (SELECT cte.b AS a, cte.z AS z FROM cte AS cte(b)) AS cte;
+
+WITH y AS (SELECT a FROM x) SELECT 1 FROM y;
+WITH y AS (SELECT 1 AS _ FROM x AS x) SELECT 1 AS "1" FROM y;
+
+WITH y AS (SELECT SUM(a) FROM x) SELECT 1 FROM y;
+WITH y AS (SELECT MAX(1) AS _ FROM x AS x) SELECT 1 AS "1" FROM y;
+
+WITH y AS (SELECT a FROM x GROUP BY a) SELECT 1 FROM y;
+WITH y AS (SELECT 1 AS _ FROM x AS x GROUP BY x.a) SELECT 1 AS "1" FROM y;
+
 --------------------------------------
 -- Unknown Star Expansion
 --------------------------------------
@@ -77,9 +92,6 @@ SELECT _q_0.a AS a FROM (SELECT aa.a AS a FROM aa AS aa UNION ALL SELECT bb.a AS
 SELECT a FROM (SELECT a FROM aa UNION ALL SELECT * FROM bb UNION ALL SELECT * from cc);
 SELECT _q_0.a AS a FROM (SELECT aa.a AS a FROM aa AS aa UNION ALL SELECT bb.a AS a FROM bb AS bb UNION ALL SELECT cc.a AS a FROM cc AS cc) AS _q_0;
 
-SELECT a FROM (SELECT * FROM aa UNION ALL SELECT * FROM bb UNION ALL SELECT * from cc);
-SELECT _q_0.a AS a FROM (SELECT aa.a AS a FROM aa AS aa UNION ALL SELECT bb.a AS a FROM bb AS bb UNION ALL SELECT cc.a AS a FROM cc AS cc) AS _q_0;
-
 SELECT a FROM (SELECT * FROM aa CROSS JOIN bb);
 SELECT _q_0.a AS a FROM (SELECT a AS a FROM aa AS aa CROSS JOIN bb AS bb) AS _q_0;
 
@@ -91,3 +103,6 @@ SELECT _q_1.a AS a FROM (SELECT _q_0.a AS a FROM (SELECT aa.a AS a FROM aa AS aa
 
 with cte1 as (SELECT cola, colb FROM tb UNION ALL SELECT colc, cold FROM tb2) SELECT cola FROM cte1;
 WITH cte1 AS (SELECT tb.cola AS cola FROM tb AS tb UNION ALL SELECT tb2.colc AS colc FROM tb2 AS tb2) SELECT cte1.cola AS cola FROM cte1;
+
+SELECT * FROM ((SELECT c FROM t1) JOIN t2);
+SELECT * FROM ((SELECT t1.c AS c FROM t1 AS t1) AS _q_0, t2 AS t2);

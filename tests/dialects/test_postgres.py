@@ -9,14 +9,45 @@ class TestPostgres(Validator):
     dialect = "postgres"
 
     def test_ddl(self):
+        self.validate_identity("CREATE INDEX idx_x ON x USING BTREE(x, y) WHERE (NOT y IS NULL)")
         self.validate_identity("CREATE TABLE test (elems JSONB[])")
         self.validate_identity("CREATE TABLE public.y (x TSTZRANGE NOT NULL)")
         self.validate_identity("CREATE TABLE test (foo HSTORE)")
         self.validate_identity("CREATE TABLE test (foo JSONB)")
         self.validate_identity("CREATE TABLE test (foo VARCHAR(64)[])")
+        self.validate_identity("CREATE TABLE test (foo INT) PARTITION BY HASH(foo)")
         self.validate_identity("INSERT INTO x VALUES (1, 'a', 2.0) RETURNING a")
         self.validate_identity("INSERT INTO x VALUES (1, 'a', 2.0) RETURNING a, b")
         self.validate_identity("INSERT INTO x VALUES (1, 'a', 2.0) RETURNING *")
+        self.validate_identity("UPDATE tbl_name SET foo = 123 RETURNING a")
+        self.validate_identity("CREATE TABLE cities_partdef PARTITION OF cities DEFAULT")
+        self.validate_identity(
+            "CREATE CONSTRAINT TRIGGER my_trigger AFTER INSERT OR DELETE OR UPDATE OF col_a, col_b ON public.my_table DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION do_sth()"
+        )
+        self.validate_identity(
+            "CREATE TABLE cust_part3 PARTITION OF customers FOR VALUES WITH (MODULUS 3, REMAINDER 2)"
+        )
+        self.validate_identity(
+            "CREATE TABLE measurement_y2016m07 PARTITION OF measurement (unitsales DEFAULT 0) FOR VALUES FROM ('2016-07-01') TO ('2016-08-01')"
+        )
+        self.validate_identity(
+            "CREATE TABLE measurement_ym_older PARTITION OF measurement_year_month FOR VALUES FROM (MINVALUE, MINVALUE) TO (2016, 11)"
+        )
+        self.validate_identity(
+            "CREATE TABLE measurement_ym_y2016m11 PARTITION OF measurement_year_month FOR VALUES FROM (2016, 11) TO (2016, 12)"
+        )
+        self.validate_identity(
+            "CREATE TABLE cities_ab PARTITION OF cities (CONSTRAINT city_id_nonzero CHECK (city_id <> 0)) FOR VALUES IN ('a', 'b')"
+        )
+        self.validate_identity(
+            "CREATE TABLE cities_ab PARTITION OF cities (CONSTRAINT city_id_nonzero CHECK (city_id <> 0)) FOR VALUES IN ('a', 'b') PARTITION BY RANGE(population)"
+        )
+        self.validate_identity(
+            "CREATE INDEX foo ON bar.baz USING btree(col1 varchar_pattern_ops ASC, col2)"
+        )
+        self.validate_identity(
+            "CREATE INDEX index_issues_on_title_trigram ON public.issues USING gin(title public.gin_trgm_ops)"
+        )
         self.validate_identity(
             "INSERT INTO x VALUES (1, 'a', 2.0) ON CONFLICT (id) DO NOTHING RETURNING *"
         )
@@ -35,7 +66,10 @@ class TestPostgres(Validator):
         self.validate_identity(
             "DELETE FROM event USING sales AS s WHERE event.eventid = s.eventid RETURNING a"
         )
-        self.validate_identity("UPDATE tbl_name SET foo = 123 RETURNING a")
+        self.validate_identity(
+            "CREATE TABLE test (x TIMESTAMP WITHOUT TIME ZONE[][])",
+            "CREATE TABLE test (x TIMESTAMP[][])",
+        )
 
         self.validate_all(
             "CREATE OR REPLACE FUNCTION function_name (input_a character varying DEFAULT NULL::character varying)",
@@ -79,6 +113,28 @@ class TestPostgres(Validator):
                 " CONSTRAINT valid_discount CHECK (price > discounted_price))"
             },
         )
+        self.validate_identity(
+            """
+            CREATE INDEX index_ci_builds_on_commit_id_and_artifacts_expireatandidpartial
+            ON public.ci_builds
+            USING btree (commit_id, artifacts_expire_at, id)
+            WHERE (
+                ((type)::text = 'Ci::Build'::text)
+                AND ((retried = false) OR (retried IS NULL))
+                AND ((name)::text = ANY (ARRAY[
+                    ('sast'::character varying)::text,
+                    ('dependency_scanning'::character varying)::text,
+                    ('sast:container'::character varying)::text,
+                    ('container_scanning'::character varying)::text,
+                    ('dast'::character varying)::text
+                ]))
+            )
+            """,
+            "CREATE INDEX index_ci_builds_on_commit_id_and_artifacts_expireatandidpartial ON public.ci_builds USING btree(commit_id, artifacts_expire_at, id) WHERE ((CAST((type) AS TEXT) = CAST('Ci::Build' AS TEXT)) AND ((retried = FALSE) OR (retried IS NULL)) AND (CAST((name) AS TEXT) = ANY (ARRAY[CAST((CAST('sast' AS VARCHAR)) AS TEXT), CAST((CAST('dependency_scanning' AS VARCHAR)) AS TEXT), CAST((CAST('sast:container' AS VARCHAR)) AS TEXT), CAST((CAST('container_scanning' AS VARCHAR)) AS TEXT), CAST((CAST('dast' AS VARCHAR)) AS TEXT)])))",
+        )
+        self.validate_identity(
+            "CREATE INDEX index_ci_pipelines_on_project_idandrefandiddesc ON public.ci_pipelines USING btree(project_id, ref, id DESC)"
+        )
 
         with self.assertRaises(ParseError):
             transpile("CREATE TABLE products (price DECIMAL CHECK price > 0)", read="postgres")
@@ -98,7 +154,7 @@ class TestPostgres(Validator):
             write={
                 "hive": "SELECT EXPLODE(c) FROM t",
                 "postgres": "SELECT UNNEST(c) FROM t",
-                "presto": "SELECT col FROM t CROSS JOIN UNNEST(c) AS _u(col)",
+                "presto": "SELECT IF(pos = pos_2, col) AS col FROM t, UNNEST(SEQUENCE(1, GREATEST(CARDINALITY(c)))) AS _u(pos) CROSS JOIN UNNEST(c) WITH ORDINALITY AS _u_2(col, pos_2) WHERE pos = pos_2 OR (pos > CARDINALITY(c) AND pos_2 = CARDINALITY(c))",
             },
         )
         self.validate_all(
@@ -106,7 +162,7 @@ class TestPostgres(Validator):
             write={
                 "hive": "SELECT EXPLODE(ARRAY(1))",
                 "postgres": "SELECT UNNEST(ARRAY[1])",
-                "presto": "SELECT col FROM UNNEST(ARRAY[1]) AS _u(col)",
+                "presto": "SELECT IF(pos = pos_2, col) AS col FROM UNNEST(SEQUENCE(1, GREATEST(CARDINALITY(ARRAY[1])))) AS _u(pos) CROSS JOIN UNNEST(ARRAY[1]) WITH ORDINALITY AS _u_2(col, pos_2) WHERE pos = pos_2 OR (pos > CARDINALITY(ARRAY[1]) AND pos_2 = CARDINALITY(ARRAY[1]))",
             },
         )
 
@@ -122,6 +178,51 @@ class TestPostgres(Validator):
         )
 
     def test_postgres(self):
+        expr = parse_one(
+            "SELECT * FROM r CROSS JOIN LATERAL UNNEST(ARRAY[1]) AS s(location)", read="postgres"
+        )
+        unnest = expr.args["joins"][0].this.this
+        unnest.assert_is(exp.Unnest)
+
+        alter_table_only = """ALTER TABLE ONLY "Album" ADD CONSTRAINT "FK_AlbumArtistId" FOREIGN KEY ("ArtistId") REFERENCES "Artist" ("ArtistId") ON DELETE NO ACTION ON UPDATE NO ACTION"""
+        expr = parse_one(alter_table_only, read="postgres")
+
+        # Checks that user-defined types are parsed into DataType instead of Identifier
+        parse_one("CREATE TABLE t (a udt)", read="postgres").this.expressions[0].args[
+            "kind"
+        ].assert_is(exp.DataType)
+
+        # Checks that OID is parsed into a DataType (ObjectIdentifier)
+        self.assertIsInstance(
+            parse_one("CREATE TABLE public.propertydata (propertyvalue oid)", read="postgres").find(
+                exp.DataType
+            ),
+            exp.ObjectIdentifier,
+        )
+
+        self.assertIsInstance(expr, exp.AlterTable)
+        self.assertEqual(expr.sql(dialect="postgres"), alter_table_only)
+
+        self.validate_identity(
+            "SELECT ARRAY[]::INT[] AS foo",
+            "SELECT CAST(ARRAY[] AS INT[]) AS foo",
+        )
+        self.validate_identity(
+            """ALTER TABLE ONLY "Album" ADD CONSTRAINT "FK_AlbumArtistId" FOREIGN KEY ("ArtistId") REFERENCES "Artist" ("ArtistId") ON DELETE CASCADE"""
+        )
+        self.validate_identity(
+            """ALTER TABLE ONLY "Album" ADD CONSTRAINT "FK_AlbumArtistId" FOREIGN KEY ("ArtistId") REFERENCES "Artist" ("ArtistId") ON DELETE RESTRICT"""
+        )
+        self.validate_identity(
+            "SELECT * FROM JSON_ARRAY_ELEMENTS('[1,true, [2,false]]') WITH ORDINALITY"
+        )
+        self.validate_identity(
+            "SELECT * FROM JSON_ARRAY_ELEMENTS('[1,true, [2,false]]') WITH ORDINALITY AS kv_json"
+        )
+        self.validate_identity(
+            "SELECT * FROM JSON_ARRAY_ELEMENTS('[1,true, [2,false]]') WITH ORDINALITY AS kv_json(a, b)"
+        )
+        self.validate_identity("x @@ y")
         self.validate_identity("CAST(x AS MONEY)")
         self.validate_identity("CAST(x AS INT4RANGE)")
         self.validate_identity("CAST(x AS INT4MULTIRANGE)")
@@ -141,7 +242,6 @@ class TestPostgres(Validator):
         self.validate_identity("SELECT ARRAY[1, 2, 3] @> ARRAY[1, 2]")
         self.validate_identity("SELECT ARRAY[1, 2, 3] <@ ARRAY[1, 2]")
         self.validate_identity("SELECT ARRAY[1, 2, 3] && ARRAY[1, 2]")
-        self.validate_identity("$x")
         self.validate_identity("x$")
         self.validate_identity("SELECT ARRAY[1, 2, 3]")
         self.validate_identity("SELECT ARRAY(SELECT 1)")
@@ -189,6 +289,7 @@ class TestPostgres(Validator):
             "SELECT PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY amount)",
             write={
                 "databricks": "SELECT PERCENTILE_APPROX(amount, 0.5)",
+                "postgres": "SELECT PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY amount)",
                 "presto": "SELECT APPROX_PERCENTILE(amount, 0.5)",
                 "spark": "SELECT PERCENTILE_APPROX(amount, 0.5)",
                 "trino": "SELECT APPROX_PERCENTILE(amount, 0.5)",
@@ -255,8 +356,8 @@ class TestPostgres(Validator):
             "GENERATE_SERIES('2019-01-01'::TIMESTAMP, NOW(), '1day')",
             write={
                 "postgres": "GENERATE_SERIES(CAST('2019-01-01' AS TIMESTAMP), CURRENT_TIMESTAMP, INTERVAL '1 day')",
-                "presto": "SEQUENCE(TRY_CAST('2019-01-01' AS TIMESTAMP), CAST(CURRENT_TIMESTAMP AS TIMESTAMP), INTERVAL '1' day)",
-                "trino": "SEQUENCE(TRY_CAST('2019-01-01' AS TIMESTAMP), CAST(CURRENT_TIMESTAMP AS TIMESTAMP), INTERVAL '1' day)",
+                "presto": "SEQUENCE(CAST('2019-01-01' AS TIMESTAMP), CAST(CURRENT_TIMESTAMP AS TIMESTAMP), INTERVAL '1' day)",
+                "trino": "SEQUENCE(CAST('2019-01-01' AS TIMESTAMP), CAST(CURRENT_TIMESTAMP AS TIMESTAMP), INTERVAL '1' day)",
             },
         )
         self.validate_all(
@@ -343,10 +444,10 @@ class TestPostgres(Validator):
         self.validate_all(
             "SELECT fname, lname, age FROM person ORDER BY age DESC NULLS FIRST, fname ASC NULLS LAST, lname",
             write={
-                "postgres": "SELECT fname, lname, age FROM person ORDER BY age DESC, fname, lname",
-                "presto": "SELECT fname, lname, age FROM person ORDER BY age DESC NULLS FIRST, fname, lname",
-                "hive": "SELECT fname, lname, age FROM person ORDER BY age DESC NULLS FIRST, fname NULLS LAST, lname NULLS LAST",
-                "spark": "SELECT fname, lname, age FROM person ORDER BY age DESC NULLS FIRST, fname NULLS LAST, lname NULLS LAST",
+                "postgres": "SELECT fname, lname, age FROM person ORDER BY age DESC, fname ASC, lname",
+                "presto": "SELECT fname, lname, age FROM person ORDER BY age DESC NULLS FIRST, fname ASC, lname",
+                "hive": "SELECT fname, lname, age FROM person ORDER BY age DESC NULLS FIRST, fname ASC NULLS LAST, lname NULLS LAST",
+                "spark": "SELECT fname, lname, age FROM person ORDER BY age DESC NULLS FIRST, fname ASC NULLS LAST, lname NULLS LAST",
             },
         )
         self.validate_all(
@@ -414,7 +515,7 @@ class TestPostgres(Validator):
             },
         )
         self.validate_all(
-            "SELECT * FROM r CROSS JOIN LATERAL unnest(array(1)) AS s(location)",
+            "SELECT * FROM r CROSS JOIN LATERAL UNNEST(ARRAY[1]) AS s(location)",
             write={
                 "postgres": "SELECT * FROM r CROSS JOIN LATERAL UNNEST(ARRAY[1]) AS s(location)",
             },
@@ -470,7 +571,7 @@ class TestPostgres(Validator):
             """SELECT JSON_ARRAY_ELEMENTS((foo->'sections')::JSON) AS sections""",
             write={
                 "postgres": """SELECT JSON_ARRAY_ELEMENTS(CAST((foo -> 'sections') AS JSON)) AS sections""",
-                "presto": """SELECT JSON_ARRAY_ELEMENTS(TRY_CAST((JSON_EXTRACT(foo, 'sections')) AS JSON)) AS sections""",
+                "presto": """SELECT JSON_ARRAY_ELEMENTS(CAST((JSON_EXTRACT(foo, 'sections')) AS JSON)) AS sections""",
             },
         )
         self.validate_all(
@@ -527,6 +628,54 @@ class TestPostgres(Validator):
             write={"postgres": "CAST(x AS CSTRING)"},
         )
         self.validate_all(
+            "x::oid",
+            write={"postgres": "CAST(x AS OID)"},
+        )
+        self.validate_all(
+            "x::regclass",
+            write={"postgres": "CAST(x AS REGCLASS)"},
+        )
+        self.validate_all(
+            "x::regcollation",
+            write={"postgres": "CAST(x AS REGCOLLATION)"},
+        )
+        self.validate_all(
+            "x::regconfig",
+            write={"postgres": "CAST(x AS REGCONFIG)"},
+        )
+        self.validate_all(
+            "x::regdictionary",
+            write={"postgres": "CAST(x AS REGDICTIONARY)"},
+        )
+        self.validate_all(
+            "x::regnamespace",
+            write={"postgres": "CAST(x AS REGNAMESPACE)"},
+        )
+        self.validate_all(
+            "x::regoper",
+            write={"postgres": "CAST(x AS REGOPER)"},
+        )
+        self.validate_all(
+            "x::regoperator",
+            write={"postgres": "CAST(x AS REGOPERATOR)"},
+        )
+        self.validate_all(
+            "x::regproc",
+            write={"postgres": "CAST(x AS REGPROC)"},
+        )
+        self.validate_all(
+            "x::regprocedure",
+            write={"postgres": "CAST(x AS REGPROCEDURE)"},
+        )
+        self.validate_all(
+            "x::regrole",
+            write={"postgres": "CAST(x AS REGROLE)"},
+        )
+        self.validate_all(
+            "x::regtype",
+            write={"postgres": "CAST(x AS REGTYPE)"},
+        )
+        self.validate_all(
             "TRIM(BOTH 'as' FROM 'as string as')",
             write={
                 "postgres": "TRIM(BOTH 'as' FROM 'as string as')",
@@ -534,10 +683,10 @@ class TestPostgres(Validator):
             },
         )
         self.validate_all(
-            "merge into x as x using (select id) as y on a = b WHEN matched then update set X.a = y.b",
+            """merge into x as x using (select id) as y on a = b WHEN matched then update set X."A" = y.b""",
             write={
-                "postgres": "MERGE INTO x AS x USING (SELECT id) AS y ON a = b WHEN MATCHED THEN UPDATE SET a = y.b",
-                "snowflake": "MERGE INTO x AS x USING (SELECT id) AS y ON a = b WHEN MATCHED THEN UPDATE SET X.a = y.b",
+                "postgres": """MERGE INTO x AS x USING (SELECT id) AS y ON a = b WHEN MATCHED THEN UPDATE SET "A" = y.b""",
+                "snowflake": """MERGE INTO x AS x USING (SELECT id) AS y ON a = b WHEN MATCHED THEN UPDATE SET X."A" = y.b""",
             },
         )
         self.validate_all(
@@ -561,6 +710,12 @@ class TestPostgres(Validator):
                 "snowflake": "MERGE INTO x USING (SELECT id) AS y ON a = b WHEN MATCHED THEN UPDATE SET x.a = y.b",
             },
         )
+        self.validate_all(
+            "MERGE INTO x USING (SELECT id) AS y ON a = b WHEN MATCHED THEN UPDATE SET x.a = y.b WHEN NOT MATCHED THEN INSERT (a, b) VALUES (y.a, y.b)",
+            write={
+                "postgres": "MERGE INTO x USING (SELECT id) AS y ON a = b WHEN MATCHED THEN UPDATE SET a = y.b WHEN NOT MATCHED THEN INSERT (a, b) VALUES (y.a, y.b)",
+            },
+        )
 
         self.validate_all(
             "x / y ^ z",
@@ -570,7 +725,7 @@ class TestPostgres(Validator):
             },
         )
 
-        self.assertIsInstance(parse_one("id::UUID", read="postgres"), exp.TryCast)
+        self.assertIsInstance(parse_one("id::UUID", read="postgres"), exp.Cast)
 
     def test_bool_or(self):
         self.validate_all(
@@ -598,9 +753,22 @@ class TestPostgres(Validator):
             "a || b",
             write={
                 "": "a || b",
-                "clickhouse": "CONCAT(CAST(a AS TEXT), CAST(b AS TEXT))",
+                "clickhouse": "CONCAT(CAST(a AS String), CAST(b AS String))",
                 "duckdb": "a || b",
                 "postgres": "a || b",
                 "presto": "CONCAT(CAST(a AS VARCHAR), CAST(b AS VARCHAR))",
             },
         )
+
+    def test_variance(self):
+        self.validate_all("VAR_SAMP(x)", write={"postgres": "VAR_SAMP(x)"})
+        self.validate_all("VAR_POP(x)", write={"postgres": "VAR_POP(x)"})
+        self.validate_all("VARIANCE(x)", write={"postgres": "VAR_SAMP(x)"})
+        self.validate_all(
+            "VAR_POP(x)", read={"": "VARIANCE_POP(x)"}, write={"postgres": "VAR_POP(x)"}
+        )
+
+    def test_regexp_binary(self):
+        """See https://github.com/tobymao/sqlglot/pull/2404 for details."""
+        self.assertIsInstance(parse_one("'thomas' ~ '.*thomas.*'", read="postgres"), exp.Binary)
+        self.assertIsInstance(parse_one("'thomas' ~* '.*thomas.*'", read="postgres"), exp.Binary)

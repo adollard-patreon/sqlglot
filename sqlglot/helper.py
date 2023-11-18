@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime
 import inspect
 import logging
 import re
@@ -13,8 +14,9 @@ from itertools import count
 
 if t.TYPE_CHECKING:
     from sqlglot import exp
-    from sqlglot._typing import E, T
+    from sqlglot._typing import A, E, T
     from sqlglot.expressions import Expression
+
 
 CAMEL_CASE_PATTERN = re.compile("(?<!^)(?=[A-Z])")
 PYTHON_VERSION = sys.version_info[:2]
@@ -31,6 +33,15 @@ class AutoName(Enum):
 
     def _generate_next_value_(name, _start, _count, _last_values):
         return name
+
+
+class classproperty(property):
+    """
+    Similar to a normal property but works for class methods
+    """
+
+    def __get__(self, obj: t.Any, owner: t.Any = None) -> t.Any:
+        return classmethod(self.fget).__get__(None, owner)()  # type: ignore
 
 
 def seq_get(seq: t.Sequence[T], index: int) -> t.Optional[T]:
@@ -137,9 +148,9 @@ def subclasses(
 
 def apply_index_offset(
     this: exp.Expression,
-    expressions: t.List[t.Optional[E]],
+    expressions: t.List[E],
     offset: int,
-) -> t.List[t.Optional[E]]:
+) -> t.List[E]:
     """
     Applies an offset to a given integer literal expression.
 
@@ -170,15 +181,12 @@ def apply_index_offset(
     ):
         return expressions
 
-    if expression:
-        if not expression.type:
-            annotate_types(expression)
-        if t.cast(exp.DataType, expression.type).this in exp.DataType.INTEGER_TYPES:
-            logger.warning("Applying array index offset (%s)", offset)
-            expression = simplify(
-                exp.Add(this=expression.copy(), expression=exp.Literal.number(offset))
-            )
-            return [expression]
+    if not expression.type:
+        annotate_types(expression)
+    if t.cast(exp.DataType, expression.type).this in exp.DataType.INTEGER_TYPES:
+        logger.warning("Applying array index offset (%s)", offset)
+        expression = simplify(exp.Add(this=expression, expression=exp.Literal.number(offset)))
+        return [expression]
 
     return expressions
 
@@ -276,7 +284,7 @@ def csv_reader(read_csv: exp.ReadCSV) -> t.Any:
     file = open_file(read_csv.name)
 
     delimiter = ","
-    args = iter(arg.name for arg in args)
+    args = iter(arg.name for arg in args)  # type: ignore
     for k, v in zip(args, args):
         if k == "delimiter":
             delimiter = v
@@ -371,7 +379,9 @@ def is_iterable(value: t.Any) -> bool:
     Returns:
         A `bool` value indicating if it is an iterable.
     """
-    return hasattr(value, "__iter__") and not isinstance(value, (str, bytes))
+    from sqlglot import Expression
+
+    return hasattr(value, "__iter__") and not isinstance(value, (str, bytes, Expression))
 
 
 def flatten(values: t.Iterable[t.Iterable[t.Any] | t.Any]) -> t.Iterator[t.Any]:
@@ -427,3 +437,54 @@ def dict_depth(d: t.Dict) -> int:
 def first(it: t.Iterable[T]) -> T:
     """Returns the first element from an iterable (useful for sets)."""
     return next(i for i in it)
+
+
+def merge_ranges(ranges: t.List[t.Tuple[A, A]]) -> t.List[t.Tuple[A, A]]:
+    """
+    Merges a sequence of ranges, represented as tuples (low, high) whose values
+    belong to some totally-ordered set.
+
+    Example:
+        >>> merge_ranges([(1, 3), (2, 6)])
+        [(1, 6)]
+    """
+    if not ranges:
+        return []
+
+    ranges = sorted(ranges)
+
+    merged = [ranges[0]]
+
+    for start, end in ranges[1:]:
+        last_start, last_end = merged[-1]
+
+        if start <= last_end:
+            merged[-1] = (last_start, max(last_end, end))
+        else:
+            merged.append((start, end))
+
+    return merged
+
+
+def is_iso_date(text: str) -> bool:
+    try:
+        datetime.date.fromisoformat(text)
+        return True
+    except ValueError:
+        return False
+
+
+def is_iso_datetime(text: str) -> bool:
+    try:
+        datetime.datetime.fromisoformat(text)
+        return True
+    except ValueError:
+        return False
+
+
+# Interval units that operate on date components
+DATE_UNITS = {"day", "week", "month", "quarter", "year", "year_month"}
+
+
+def is_date_unit(expression: t.Optional[exp.Expression]) -> bool:
+    return expression is not None and expression.name.lower() in DATE_UNITS

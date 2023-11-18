@@ -8,13 +8,19 @@ from sqlglot import exp, generator, parser, tokens, transforms
 from sqlglot._typing import E
 from sqlglot.dialects.dialect import (
     Dialect,
+    arg_max_or_min_no_count,
+    binary_from_function,
+    date_add_interval_sql,
     datestrtodate_sql,
     format_time_lambda,
+    if_sql,
     inline_array_sql,
+    json_keyvalue_comma_sql,
     max_or_greatest,
     min_or_least,
     no_ilike_sql,
     parse_date_delta_with_interval,
+    regexp_replace_sql,
     rename_func,
     timestrtotime_sql,
     ts_or_ds_to_date_sql,
@@ -25,21 +31,8 @@ from sqlglot.tokens import TokenType
 logger = logging.getLogger("sqlglot")
 
 
-def _date_add_sql(
-    data_type: str, kind: str
-) -> t.Callable[[generator.Generator, exp.Expression], str]:
-    def func(self, expression):
-        this = self.sql(expression, "this")
-        unit = expression.args.get("unit")
-        unit = exp.var(unit.name.upper() if unit else "DAY")
-        interval = exp.Interval(this=expression.expression, unit=unit)
-        return f"{data_type}_{kind}({this}, {self.sql(interval)})"
-
-    return func
-
-
-def _derived_table_values_to_unnest(self: generator.Generator, expression: exp.Values) -> str:
-    if not isinstance(expression.unnest().parent, exp.From):
+def _derived_table_values_to_unnest(self: BigQuery.Generator, expression: exp.Values) -> str:
+    if not expression.find_ancestor(exp.From, exp.Join):
         return self.values_sql(expression)
 
     alias = expression.args.get("alias")
@@ -62,7 +55,7 @@ def _derived_table_values_to_unnest(self: generator.Generator, expression: exp.V
     return self.unnest_sql(exp.Unnest(expressions=[exp.Array(expressions=structs)]))
 
 
-def _returnsproperty_sql(self: generator.Generator, expression: exp.ReturnsProperty) -> str:
+def _returnsproperty_sql(self: BigQuery.Generator, expression: exp.ReturnsProperty) -> str:
     this = expression.this
     if isinstance(this, exp.Schema):
         this = f"{this.this} <{self.expressions(this)}>"
@@ -71,19 +64,14 @@ def _returnsproperty_sql(self: generator.Generator, expression: exp.ReturnsPrope
     return f"RETURNS {this}"
 
 
-def _create_sql(self: generator.Generator, expression: exp.Create) -> str:
+def _create_sql(self: BigQuery.Generator, expression: exp.Create) -> str:
     kind = expression.args["kind"]
     returns = expression.find(exp.ReturnsProperty)
+
     if kind.upper() == "FUNCTION" and returns and returns.args.get("is_table"):
-        expression = expression.copy()
         expression.set("kind", "TABLE FUNCTION")
-        if isinstance(
-            expression.expression,
-            (
-                exp.Subquery,
-                exp.Literal,
-            ),
-        ):
+
+        if isinstance(expression.expression, (exp.Subquery, exp.Literal)):
             expression.set("expression", expression.expression.this)
 
         return self.create_sql(expression)
@@ -96,14 +84,20 @@ def _unqualify_unnest(expression: exp.Expression) -> exp.Expression:
 
     These are added by the optimizer's qualify_column step.
     """
-    from sqlglot.optimizer.scope import Scope
+    from sqlglot.optimizer.scope import find_all_in_scope
 
     if isinstance(expression, exp.Select):
-        for unnest in expression.find_all(exp.Unnest):
-            if isinstance(unnest.parent, (exp.From, exp.Join)) and unnest.alias:
-                for column in Scope(expression).find_all(exp.Column):
-                    if column.table == unnest.alias:
-                        column.set("table", None)
+        unnest_aliases = {
+            unnest.alias
+            for unnest in find_all_in_scope(expression, exp.Unnest)
+            if isinstance(unnest.parent, (exp.From, exp.Join))
+        }
+        if unnest_aliases:
+            for column in expression.find_all(exp.Column):
+                if column.table in unnest_aliases:
+                    column.set("table", None)
+                elif column.db in unnest_aliases:
+                    column.set("db", None)
 
     return expression
 
@@ -180,8 +174,21 @@ def _parse_to_hex(args: t.List) -> exp.Hex | exp.MD5:
     return exp.MD5(this=arg.this) if isinstance(arg, exp.MD5Digest) else exp.Hex(this=arg)
 
 
+def _array_contains_sql(self: BigQuery.Generator, expression: exp.ArrayContains) -> str:
+    return self.sql(
+        exp.Exists(
+            this=exp.select("1")
+            .from_(exp.Unnest(expressions=[expression.left]).as_("_unnest", table=["_col"]))
+            .where(exp.column("_col").eq(expression.right))
+        )
+    )
+
+
 class BigQuery(Dialect):
     UNNEST_COLUMN_ONLY = True
+    SUPPORTS_USER_DEFINED_TYPES = False
+    SUPPORTS_SEMI_ANTI_JOIN = False
+    LOG_BASE_FIRST = False
 
     # https://cloud.google.com/bigquery/docs/reference/standard-sql/lexical#case_sensitivity
     RESOLVES_IDENTIFIERS_AS_UPPERCASE = None
@@ -191,6 +198,16 @@ class BigQuery(Dialect):
 
     TIME_MAPPING = {
         "%D": "%m/%d/%y",
+    }
+
+    ESCAPE_SEQUENCES = {
+        "\\a": "\a",
+        "\\b": "\b",
+        "\\f": "\f",
+        "\\n": "\n",
+        "\\r": "\r",
+        "\\t": "\t",
+        "\\v": "\v",
     }
 
     FORMAT_MAPPING = {
@@ -209,17 +226,20 @@ class BigQuery(Dialect):
         "TZH": "%z",
     }
 
+    # The _PARTITIONTIME and _PARTITIONDATE pseudo-columns are not returned by a SELECT * statement
+    # https://cloud.google.com/bigquery/docs/querying-partitioned-tables#query_an_ingestion-time_partitioned_table
+    PSEUDOCOLUMNS = {"_PARTITIONTIME", "_PARTITIONDATE"}
+
     @classmethod
     def normalize_identifier(cls, expression: E) -> E:
-        # In BigQuery, CTEs aren't case-sensitive, but table names are (by default, at least).
-        # The following check is essentially a heuristic to detect tables based on whether or
-        # not they're qualified.
         if isinstance(expression, exp.Identifier):
             parent = expression.parent
-
             while isinstance(parent, exp.Dot):
                 parent = parent.parent
 
+            # In BigQuery, CTEs aren't case-sensitive, but table names are (by default, at least).
+            # The following check is essentially a heuristic to detect tables based on whether or
+            # not they're qualified. It also avoids normalizing UDFs, because they're case-sensitive.
             if (
                 not isinstance(parent, exp.UserDefinedFunction)
                 and not (isinstance(parent, exp.Table) and parent.db)
@@ -250,22 +270,21 @@ class BigQuery(Dialect):
             "ANY TYPE": TokenType.VARIANT,
             "BEGIN": TokenType.COMMAND,
             "BEGIN TRANSACTION": TokenType.BEGIN,
-            "CURRENT_DATETIME": TokenType.CURRENT_DATETIME,
             "BYTES": TokenType.BINARY,
+            "CURRENT_DATETIME": TokenType.CURRENT_DATETIME,
             "DECLARE": TokenType.COMMAND,
             "FLOAT64": TokenType.DOUBLE,
-            "INT64": TokenType.BIGINT,
+            "FOR SYSTEM_TIME": TokenType.TIMESTAMP_SNAPSHOT,
+            "MODEL": TokenType.MODEL,
+            "NOT DETERMINISTIC": TokenType.VOLATILE,
             "RECORD": TokenType.STRUCT,
             "TIMESTAMP": TokenType.TIMESTAMPTZ,
-            "NOT DETERMINISTIC": TokenType.VOLATILE,
-            "UNKNOWN": TokenType.NULL,
         }
         KEYWORDS.pop("DIV")
 
     class Parser(parser.Parser):
         PREFIXED_PIVOT_COLUMNS = True
 
-        LOG_BASE_FIRST = False
         LOG_DEFAULTS_TO_LN = True
 
         FUNCTIONS = {
@@ -279,7 +298,7 @@ class BigQuery(Dialect):
             ),
             "DATETIME_ADD": parse_date_delta_with_interval(exp.DatetimeAdd),
             "DATETIME_SUB": parse_date_delta_with_interval(exp.DatetimeSub),
-            "DIV": lambda args: exp.IntDiv(this=seq_get(args, 0), expression=seq_get(args, 1)),
+            "DIV": binary_from_function(exp.IntDiv),
             "GENERATE_ARRAY": exp.GenerateSeries.from_arg_list,
             "MD5": exp.MD5Digest.from_arg_list,
             "TO_HEX": _parse_to_hex,
@@ -293,10 +312,10 @@ class BigQuery(Dialect):
                 expression=seq_get(args, 1),
                 position=seq_get(args, 2),
                 occurrence=seq_get(args, 3),
-                group=exp.Literal.number(1)
-                if re.compile(str(seq_get(args, 1))).groups == 1
-                else None,
+                group=exp.Literal.number(1) if re.compile(args[1].name).groups == 1 else None,
             ),
+            "SHA256": lambda args: exp.SHA2(this=seq_get(args, 0), length=exp.Literal.number(256)),
+            "SHA512": lambda args: exp.SHA2(this=seq_get(args, 0), length=exp.Literal.number(512)),
             "SPLIT": lambda args: exp.Split(
                 # https://cloud.google.com/bigquery/docs/reference/standard-sql/string_functions#split
                 this=seq_get(args, 0),
@@ -343,8 +362,24 @@ class BigQuery(Dialect):
             "OPTIONS": lambda self: exp.Properties(expressions=self._parse_with_property()),
         }
 
+        RANGE_PARSERS = parser.Parser.RANGE_PARSERS.copy()
+        RANGE_PARSERS.pop(TokenType.OVERLAPS, None)
+
+        NULL_TOKENS = {TokenType.NULL, TokenType.UNKNOWN}
+
+        STATEMENT_PARSERS = {
+            **parser.Parser.STATEMENT_PARSERS,
+            TokenType.END: lambda self: self._parse_as_command(self._prev),
+            TokenType.FOR: lambda self: self._parse_for_in(),
+        }
+
+        def _parse_for_in(self) -> exp.ForIn:
+            this = self._parse_range()
+            self._match_text_seq("DO")
+            return self.expression(exp.ForIn, this=this, expression=self._parse_statement())
+
         def _parse_table_part(self, schema: bool = False) -> t.Optional[exp.Expression]:
-            this = super()._parse_table_part(schema=schema)
+            this = super()._parse_table_part(schema=schema) or self._parse_number()
 
             # https://cloud.google.com/bigquery/docs/reference/standard-sql/lexical#table_names
             if isinstance(this, exp.Identifier):
@@ -354,6 +389,17 @@ class BigQuery(Dialect):
                     table_name += f"-{self._prev.text}"
 
                 this = exp.Identifier(this=table_name, quoted=this.args.get("quoted"))
+            elif isinstance(this, exp.Literal):
+                table_name = this.name
+
+                if (
+                    self._curr
+                    and self._prev.end == self._curr.start - 1
+                    and self._parse_var(any_token=True)
+                ):
+                    table_name += self._prev.text
+
+                this = exp.Identifier(this=table_name, quoted=True)
 
             return this
 
@@ -372,6 +418,27 @@ class BigQuery(Dialect):
 
             return table
 
+        def _parse_json_object(self) -> exp.JSONObject:
+            json_object = super()._parse_json_object()
+            array_kv_pair = seq_get(json_object.expressions, 0)
+
+            # Converts BQ's "signature 2" of JSON_OBJECT into SQLGlot's canonical representation
+            # https://cloud.google.com/bigquery/docs/reference/standard-sql/json_functions#json_object_signature2
+            if (
+                array_kv_pair
+                and isinstance(array_kv_pair.this, exp.Array)
+                and isinstance(array_kv_pair.expression, exp.Array)
+            ):
+                keys = array_kv_pair.this.expressions
+                values = array_kv_pair.expression.expressions
+
+                json_object.set(
+                    "expressions",
+                    [exp.JSONKeyValue(this=k, expression=v) for k, v in zip(keys, values)],
+                )
+
+            return json_object
+
     class Generator(generator.Generator):
         EXPLICIT_UNION = True
         INTERVAL_ALLOWS_PLURAL_FORM = False
@@ -380,29 +447,40 @@ class BigQuery(Dialect):
         TABLE_HINTS = False
         LIMIT_FETCH = "LIMIT"
         RENAME_TABLE_WITH_DB = False
-        ESCAPE_LINE_BREAK = True
+        NVL2_SUPPORTED = False
+        UNNEST_WITH_ORDINALITY = False
+        COLLATE_IS_FUNC = True
+        LIMIT_ONLY_LITERALS = True
 
         TRANSFORMS = {
             **generator.Generator.TRANSFORMS,
             exp.ApproxDistinct: rename_func("APPROX_COUNT_DISTINCT"),
+            exp.ArgMax: arg_max_or_min_no_count("MAX_BY"),
+            exp.ArgMin: arg_max_or_min_no_count("MIN_BY"),
+            exp.ArrayContains: _array_contains_sql,
             exp.ArraySize: rename_func("ARRAY_LENGTH"),
             exp.Cast: transforms.preprocess([transforms.remove_precision_parameterized_types]),
+            exp.CollateProperty: lambda self, e: f"DEFAULT COLLATE {self.sql(e, 'this')}"
+            if e.args.get("default")
+            else f"COLLATE {self.sql(e, 'this')}",
             exp.Create: _create_sql,
             exp.CTE: transforms.preprocess([_pushdown_cte_column_names]),
-            exp.DateAdd: _date_add_sql("DATE", "ADD"),
+            exp.DateAdd: date_add_interval_sql("DATE", "ADD"),
             exp.DateDiff: lambda self, e: f"DATE_DIFF({self.sql(e, 'this')}, {self.sql(e, 'expression')}, {self.sql(e.args.get('unit', 'DAY'))})",
             exp.DateFromParts: rename_func("DATE"),
             exp.DateStrToDate: datestrtodate_sql,
-            exp.DateSub: _date_add_sql("DATE", "SUB"),
-            exp.DatetimeAdd: _date_add_sql("DATETIME", "ADD"),
-            exp.DatetimeSub: _date_add_sql("DATETIME", "SUB"),
+            exp.DateSub: date_add_interval_sql("DATE", "SUB"),
+            exp.DatetimeAdd: date_add_interval_sql("DATETIME", "ADD"),
+            exp.DatetimeSub: date_add_interval_sql("DATETIME", "SUB"),
             exp.DateTrunc: lambda self, e: self.func("DATE_TRUNC", e.this, e.text("unit")),
             exp.GenerateSeries: rename_func("GENERATE_ARRAY"),
             exp.GroupConcat: rename_func("STRING_AGG"),
             exp.Hex: rename_func("TO_HEX"),
+            exp.If: if_sql(false_value="NULL"),
             exp.ILike: no_ilike_sql,
             exp.IntDiv: rename_func("DIV"),
             exp.JSONFormat: rename_func("TO_JSON_STRING"),
+            exp.JSONKeyValue: json_keyvalue_comma_sql,
             exp.Max: max_or_greatest,
             exp.MD5: lambda self, e: self.func("TO_HEX", self.func("MD5", e.this)),
             exp.MD5Digest: rename_func("MD5"),
@@ -415,15 +493,20 @@ class BigQuery(Dialect):
                 e.args.get("position"),
                 e.args.get("occurrence"),
             ),
+            exp.RegexpReplace: regexp_replace_sql,
             exp.RegexpLike: rename_func("REGEXP_CONTAINS"),
             exp.ReturnsProperty: _returnsproperty_sql,
             exp.Select: transforms.preprocess(
                 [
-                    transforms.explode_to_unnest,
+                    transforms.explode_to_unnest(),
                     _unqualify_unnest,
                     transforms.eliminate_distinct_on,
                     _alias_ordered_group,
+                    transforms.eliminate_semi_and_anti_joins,
                 ]
+            ),
+            exp.SHA2: lambda self, e: self.func(
+                f"SHA256" if e.text("length") == "256" else "SHA512", e.this
             ),
             exp.StabilityProperty: lambda self, e: f"DETERMINISTIC"
             if e.name == "IMMUTABLE"
@@ -432,13 +515,13 @@ class BigQuery(Dialect):
             exp.StrToTime: lambda self, e: self.func(
                 "PARSE_TIMESTAMP", self.format_time(e), e.this, e.args.get("zone")
             ),
-            exp.TimeAdd: _date_add_sql("TIME", "ADD"),
-            exp.TimeSub: _date_add_sql("TIME", "SUB"),
-            exp.TimestampAdd: _date_add_sql("TIMESTAMP", "ADD"),
-            exp.TimestampSub: _date_add_sql("TIMESTAMP", "SUB"),
+            exp.TimeAdd: date_add_interval_sql("TIME", "ADD"),
+            exp.TimeSub: date_add_interval_sql("TIME", "SUB"),
+            exp.TimestampAdd: date_add_interval_sql("TIMESTAMP", "ADD"),
+            exp.TimestampSub: date_add_interval_sql("TIMESTAMP", "SUB"),
             exp.TimeStrToTime: timestrtotime_sql,
             exp.Trim: lambda self, e: self.func(f"TRIM", e.this, e.expression),
-            exp.TsOrDsAdd: _date_add_sql("DATE", "ADD"),
+            exp.TsOrDsAdd: date_add_interval_sql("DATE", "ADD"),
             exp.TsOrDsToDate: ts_or_ds_to_date_sql("bigquery"),
             exp.Unhex: rename_func("FROM_HEX"),
             exp.Values: _derived_table_values_to_unnest,
@@ -576,6 +659,13 @@ class BigQuery(Dialect):
             "within",
         }
 
+        def eq_sql(self, expression: exp.EQ) -> str:
+            # Operands of = cannot be NULL in BigQuery
+            if isinstance(expression.left, exp.Null) or isinstance(expression.right, exp.Null):
+                return "NULL"
+
+            return self.binary(expression, "=")
+
         def attimezone_sql(self, expression: exp.AtTimeZone) -> str:
             parent = expression.parent
 
@@ -627,3 +717,8 @@ class BigQuery(Dialect):
 
         def with_properties(self, properties: exp.Properties) -> str:
             return self.properties(properties, prefix=self.seg("OPTIONS"))
+
+        def version_sql(self, expression: exp.Version) -> str:
+            if expression.name == "TIMESTAMP":
+                expression.set("this", "SYSTEM_TIME")
+            return super().version_sql(expression)

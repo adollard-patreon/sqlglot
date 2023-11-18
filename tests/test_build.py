@@ -3,6 +3,7 @@ import unittest
 from sqlglot import (
     alias,
     and_,
+    case,
     condition,
     except_,
     exp,
@@ -58,6 +59,9 @@ class TestBuild(unittest.TestCase):
             (lambda: x.as_("y"), "x AS y"),
             (lambda: x.isin(1, "2"), "x IN (1, '2')"),
             (lambda: x.isin(query="select 1"), "x IN (SELECT 1)"),
+            (lambda: x.isin(unnest="x"), "x IN (SELECT UNNEST(x))"),
+            (lambda: x.isin(unnest="x"), "x IN UNNEST(x)", "bigquery"),
+            (lambda: x.isin(unnest=["x", "y"]), "x IN (SELECT UNNEST(x, y))"),
             (lambda: x.between(1, 2), "x BETWEEN 1 AND 2"),
             (lambda: 1 + x + 2 + 3, "1 + x + 2 + 3"),
             (lambda: 1 + x * 2 + 3, "1 + (x * 2) + 3"),
@@ -74,8 +78,12 @@ class TestBuild(unittest.TestCase):
             (lambda: x.ilike("y"), "x ILIKE 'y'"),
             (lambda: x.rlike("y"), "REGEXP_LIKE(x, 'y')"),
             (
-                lambda: exp.Case().when("x = 1", "x").else_("bar"),
+                lambda: case().when("x = 1", "x").else_("bar"),
                 "CASE WHEN x = 1 THEN x ELSE bar END",
+            ),
+            (
+                lambda: case("x").when("1", "x").else_("bar"),
+                "CASE x WHEN 1 THEN x ELSE bar END",
             ),
             (lambda: exp.func("COALESCE", "x", 1), "COALESCE(x, 1)"),
             (lambda: select("x"), "SELECT x"),
@@ -493,7 +501,7 @@ class TestBuild(unittest.TestCase):
             ),
             (
                 lambda: exp.update("tbl", {"x": None, "y": {"x": 1}}),
-                "UPDATE tbl SET x = NULL, y = MAP('x', 1)",
+                "UPDATE tbl SET x = NULL, y = MAP(ARRAY('x'), ARRAY(1))",
             ),
             (
                 lambda: exp.update("tbl", {"x": 1}, where="y > 0"),

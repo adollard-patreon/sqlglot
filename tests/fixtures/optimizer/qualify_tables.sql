@@ -101,3 +101,23 @@ SELECT * FROM (SELECT * FROM c.db.tbl1 AS tbl1 JOIN c.db.tbl2 AS tbl2 ON id1 = i
 # title: join construct within join construct
 SELECT * FROM (tbl1 AS tbl1 JOIN (tbl2 AS tbl2 JOIN tbl3 AS tbl3 ON id2 = id3) AS _q_0 ON id1 = id3) AS _q_1;
 SELECT * FROM (SELECT * FROM c.db.tbl1 AS tbl1 JOIN (SELECT * FROM c.db.tbl2 AS tbl2 JOIN c.db.tbl3 AS tbl3 ON id2 = id3) AS _q_0 ON id1 = id3) AS _q_1;
+
+# title: wrapped subquery without alias
+SELECT * FROM ((SELECT * FROM t));
+SELECT * FROM ((SELECT * FROM c.db.t AS t) AS _q_0);
+
+# title: wrapped subquery without alias joined with a table
+SELECT * FROM ((SELECT * FROM t1) INNER JOIN t2 ON a = b);
+SELECT * FROM ((SELECT * FROM c.db.t1 AS t1) AS _q_0 INNER JOIN c.db.t2 AS t2 ON a = b);
+
+# title: lateral unnest with alias
+SELECT x FROM t, LATERAL UNNEST(t.xs) AS x;
+SELECT x FROM c.db.t AS t, LATERAL UNNEST(t.xs) AS x;
+
+# title: lateral unnest without alias
+SELECT x FROM t, LATERAL UNNEST(t.xs);
+SELECT x FROM c.db.t AS t, LATERAL UNNEST(t.xs) AS _q_0;
+
+# title: table with ordinality
+SELECT * FROM t CROSS JOIN JSON_ARRAY_ELEMENTS(t.response) WITH ORDINALITY AS kv_json;
+SELECT * FROM c.db.t AS t CROSS JOIN JSON_ARRAY_ELEMENTS(t.response) WITH ORDINALITY AS kv_json;

@@ -1,6 +1,6 @@
 ![SQLGlot logo](sqlglot.svg)
 
-SQLGlot is a no-dependency SQL parser, transpiler, optimizer, and engine. It can be used to format SQL or translate between [19 different dialects](https://github.com/tobymao/sqlglot/blob/main/sqlglot/dialects/__init__.py) like [DuckDB](https://duckdb.org/), [Presto](https://prestodb.io/), [Spark](https://spark.apache.org/), [Snowflake](https://www.snowflake.com/en/), and [BigQuery](https://cloud.google.com/bigquery/). It aims to read a wide variety of SQL inputs and output syntactically correct SQL in the targeted dialects.
+SQLGlot is a no-dependency SQL parser, transpiler, optimizer, and engine. It can be used to format SQL or translate between [20 different dialects](https://github.com/tobymao/sqlglot/blob/main/sqlglot/dialects/__init__.py) like [DuckDB](https://duckdb.org/), [Presto](https://prestodb.io/) / [Trino](https://trino.io/), [Spark](https://spark.apache.org/) / [Databricks](https://www.databricks.com/), [Snowflake](https://www.snowflake.com/en/), and [BigQuery](https://cloud.google.com/bigquery/). It aims to read a wide variety of SQL inputs and output syntactically and semantically correct SQL in the targeted dialects.
 
 It is a very comprehensive generic SQL parser with a robust [test suite](https://github.com/tobymao/sqlglot/blob/main/tests/). It is also quite [performant](#benchmarks), while being written purely in Python.
 
@@ -70,7 +70,7 @@ We'd love to hear from you. Join our community [Slack channel](https://tobikodat
 
 ### Formatting and Transpiling
 
-Easily translate from one dialect to another. For example, date/time functions vary from dialects and can be hard to deal with:
+Easily translate from one dialect to another. For example, date/time functions vary between dialects and can be hard to deal with:
 
 ```python
 import sqlglot
@@ -122,7 +122,7 @@ LEFT JOIN `baz`
   ON `f`.`a` = `baz`.`a`
 ```
 
-Comments are also preserved in a best-effort basis when transpiling SQL code:
+Comments are also preserved on a best-effort basis when transpiling SQL code:
 
 ```python
 sql = """
@@ -178,7 +178,7 @@ for table in parse_one("SELECT * FROM x JOIN y JOIN z").find_all(exp.Table):
 
 ### Parser Errors
 
-When the parser detects an error in the syntax, it raises a ParserError:
+When the parser detects an error in the syntax, it raises a ParseError:
 
 ```python
 import sqlglot

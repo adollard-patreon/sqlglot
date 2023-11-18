@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 
 from sqlglot import Schema, exp, maybe_parse
 from sqlglot.errors import SqlglotError
-from sqlglot.optimizer import Scope, build_scope, qualify
+from sqlglot.optimizer import Scope, build_scope, find_all_in_scope, qualify
 
 if t.TYPE_CHECKING:
     from sqlglot.dialects.dialect import DialectType
@@ -79,7 +79,7 @@ def lineage(
         raise SqlglotError("Cannot build lineage, sql must be SELECT")
 
     def to_node(
-        column_name: str,
+        column: str | int,
         scope: Scope,
         scope_name: t.Optional[str] = None,
         upstream: t.Optional[Node] = None,
@@ -90,26 +90,44 @@ def lineage(
             for dt in scope.derived_tables
             if dt.comments and dt.comments[0].startswith("source: ")
         }
-        if isinstance(scope.expression, exp.Union):
-            for scope in scope.union_scopes:
-                node = to_node(
-                    column_name,
-                    scope=scope,
-                    scope_name=scope_name,
-                    upstream=upstream,
-                    alias=aliases.get(scope_name),
-                )
-            return node
 
         # Find the specific select clause that is the source of the column we want.
         # This can either be a specific, named select or a generic `*` clause.
-        select = next(
-            (select for select in scope.expression.selects if select.alias_or_name == column_name),
-            exp.Star() if scope.expression.is_star else None,
+        select = (
+            scope.expression.selects[column]
+            if isinstance(column, int)
+            else next(
+                (select for select in scope.expression.selects if select.alias_or_name == column),
+                exp.Star() if scope.expression.is_star else None,
+            )
         )
 
         if not select:
-            raise ValueError(f"Could not find {column_name} in {scope.expression}")
+            raise ValueError(f"Could not find {column} in {scope.expression}")
+
+        if isinstance(scope.expression, exp.Union):
+            upstream = upstream or Node(name="UNION", source=scope.expression, expression=select)
+
+            index = (
+                column
+                if isinstance(column, int)
+                else next(
+                    (
+                        i
+                        for i, select in enumerate(scope.expression.selects)
+                        if select.alias_or_name == column or select.is_star
+                    ),
+                    -1,  # mypy will not allow a None here, but a negative index should never be returned
+                )
+            )
+
+            if index == -1:
+                raise ValueError(f"Could not find {column} in {scope.expression}")
+
+            for s in scope.union_scopes:
+                to_node(index, scope=s, upstream=upstream)
+
+            return upstream
 
         if isinstance(scope.expression, exp.Select):
             # For better ergonomics in our node labels, replace the full select with
@@ -122,16 +140,39 @@ def lineage(
 
         # Create the node for this step in the lineage chain, and attach it to the previous one.
         node = Node(
-            name=f"{scope_name}.{column_name}" if scope_name else column_name,
+            name=f"{scope_name}.{column}" if scope_name else str(column),
             source=source,
             expression=select,
             alias=alias or "",
         )
+
         if upstream:
             upstream.downstream.append(node)
 
+        subquery_scopes = {
+            id(subquery_scope.expression): subquery_scope
+            for subquery_scope in scope.subquery_scopes
+        }
+
+        for subquery in find_all_in_scope(select, exp.Subqueryable):
+            subquery_scope = subquery_scopes[id(subquery)]
+
+            for name in subquery.named_selects:
+                to_node(name, scope=subquery_scope, upstream=node)
+
+        # if the select is a star add all scope sources as downstreams
+        if select.is_star:
+            for source in scope.sources.values():
+                node.downstream.append(Node(name=select.sql(), source=source, expression=source))
+
         # Find all columns that went into creating this one to list their lineage nodes.
-        for c in set(select.find_all(exp.Column)):
+        source_columns = set(find_all_in_scope(select, exp.Column))
+
+        # If the source is a UDTF find columns used in the UTDF to generate the table
+        if isinstance(source, exp.UDTF):
+            source_columns |= set(source.find_all(exp.Column))
+
+        for c in source_columns:
             table = c.table
             source = scope.sources.get(table)
 

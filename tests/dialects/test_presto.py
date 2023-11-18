@@ -1,6 +1,6 @@
 from unittest import mock
 
-from sqlglot import UnsupportedError
+from sqlglot import UnsupportedError, exp, parse_one
 from tests.dialects.test_dialect import Validator
 
 
@@ -8,6 +8,31 @@ class TestPresto(Validator):
     dialect = "presto"
 
     def test_cast(self):
+        self.validate_identity("CAST(x AS IPADDRESS)")
+        self.validate_identity("CAST(x AS IPPREFIX)")
+
+        self.validate_all(
+            "CAST(x AS INTERVAL YEAR TO MONTH)",
+            write={
+                "oracle": "CAST(x AS INTERVAL YEAR TO MONTH)",
+                "presto": "CAST(x AS INTERVAL YEAR TO MONTH)",
+            },
+        )
+        self.validate_all(
+            "CAST(x AS INTERVAL DAY TO SECOND)",
+            write={
+                "oracle": "CAST(x AS INTERVAL DAY TO SECOND)",
+                "presto": "CAST(x AS INTERVAL DAY TO SECOND)",
+            },
+        )
+        self.validate_all(
+            "SELECT CAST('10C' AS INTEGER)",
+            read={
+                "postgres": "SELECT CAST('10C' AS INTEGER)",
+                "presto": "SELECT CAST('10C' AS INTEGER)",
+                "redshift": "SELECT CAST('10C' AS INTEGER)",
+            },
+        )
         self.validate_all(
             "SELECT DATE_DIFF('week', CAST(CAST('2009-01-01' AS TIMESTAMP) AS DATE), CAST(CAST('2009-12-31' AS TIMESTAMP) AS DATE))",
             read={"redshift": "SELECT DATEDIFF(week, '2009-01-01', '2009-12-31')"},
@@ -17,7 +42,7 @@ class TestPresto(Validator):
             read={"redshift": "SELECT DATEADD(month, 18, '2008-02-28')"},
         )
         self.validate_all(
-            "SELECT TRY_CAST('1970-01-01 00:00:00' AS TIMESTAMP)",
+            "SELECT CAST('1970-01-01 00:00:00' AS TIMESTAMP)",
             read={"postgres": "SELECT 'epoch'::TIMESTAMP"},
         )
         self.validate_all(
@@ -63,7 +88,7 @@ class TestPresto(Validator):
             "CAST(ARRAY[1, 2] AS ARRAY(BIGINT))",
             write={
                 "bigquery": "CAST([1, 2] AS ARRAY<INT64>)",
-                "duckdb": "CAST(LIST_VALUE(1, 2) AS BIGINT[])",
+                "duckdb": "CAST([1, 2] AS BIGINT[])",
                 "presto": "CAST(ARRAY[1, 2] AS ARRAY(BIGINT))",
                 "spark": "CAST(ARRAY(1, 2) AS ARRAY<BIGINT>)",
                 "snowflake": "CAST([1, 2] AS ARRAY)",
@@ -73,7 +98,7 @@ class TestPresto(Validator):
             "CAST(MAP(ARRAY[1], ARRAY[1]) AS MAP(INT,INT))",
             write={
                 "bigquery": "CAST(MAP([1], [1]) AS MAP<INT64, INT64>)",
-                "duckdb": "CAST(MAP(LIST_VALUE(1), LIST_VALUE(1)) AS MAP(INT, INT))",
+                "duckdb": "CAST(MAP([1], [1]) AS MAP(INT, INT))",
                 "presto": "CAST(MAP(ARRAY[1], ARRAY[1]) AS MAP(INTEGER, INTEGER))",
                 "hive": "CAST(MAP(1, 1) AS MAP<INT, INT>)",
                 "spark": "CAST(MAP_FROM_ARRAYS(ARRAY(1), ARRAY(1)) AS MAP<INT, INT>)",
@@ -84,7 +109,7 @@ class TestPresto(Validator):
             "CAST(MAP(ARRAY['a','b','c'], ARRAY[ARRAY[1], ARRAY[2], ARRAY[3]]) AS MAP(VARCHAR, ARRAY(INT)))",
             write={
                 "bigquery": "CAST(MAP(['a', 'b', 'c'], [[1], [2], [3]]) AS MAP<STRING, ARRAY<INT64>>)",
-                "duckdb": "CAST(MAP(LIST_VALUE('a', 'b', 'c'), LIST_VALUE(LIST_VALUE(1), LIST_VALUE(2), LIST_VALUE(3))) AS MAP(TEXT, INT[]))",
+                "duckdb": "CAST(MAP(['a', 'b', 'c'], [[1], [2], [3]]) AS MAP(TEXT, INT[]))",
                 "presto": "CAST(MAP(ARRAY['a', 'b', 'c'], ARRAY[ARRAY[1], ARRAY[2], ARRAY[3]]) AS MAP(VARCHAR, ARRAY(INTEGER)))",
                 "hive": "CAST(MAP('a', ARRAY(1), 'b', ARRAY(2), 'c', ARRAY(3)) AS MAP<STRING, ARRAY<INT>>)",
                 "spark": "CAST(MAP_FROM_ARRAYS(ARRAY('a', 'b', 'c'), ARRAY(ARRAY(1), ARRAY(2), ARRAY(3))) AS MAP<STRING, ARRAY<INT>>)",
@@ -92,10 +117,19 @@ class TestPresto(Validator):
             },
         )
         self.validate_all(
+            "CAST(x AS TIME(5) WITH TIME ZONE)",
+            write={
+                "duckdb": "CAST(x AS TIMETZ)",
+                "postgres": "CAST(x AS TIMETZ(5))",
+                "presto": "CAST(x AS TIME(5) WITH TIME ZONE)",
+                "redshift": "CAST(x AS TIME(5) WITH TIME ZONE)",
+            },
+        )
+        self.validate_all(
             "CAST(x AS TIMESTAMP(9) WITH TIME ZONE)",
             write={
                 "bigquery": "CAST(x AS TIMESTAMP)",
-                "duckdb": "CAST(x AS TIMESTAMPTZ(9))",
+                "duckdb": "CAST(x AS TIMESTAMPTZ)",
                 "presto": "CAST(x AS TIMESTAMP(9) WITH TIME ZONE)",
                 "hive": "CAST(x AS TIMESTAMP)",
                 "spark": "CAST(x AS TIMESTAMP)",
@@ -103,6 +137,13 @@ class TestPresto(Validator):
         )
 
     def test_regex(self):
+        self.validate_all(
+            "REGEXP_REPLACE('abcd', '[ab]')",
+            write={
+                "presto": "REGEXP_REPLACE('abcd', '[ab]', '')",
+                "spark": "REGEXP_REPLACE('abcd', '[ab]', '')",
+            },
+        )
         self.validate_all(
             "REGEXP_LIKE(a, 'x')",
             write={
@@ -169,6 +210,9 @@ class TestPresto(Validator):
             )
 
     def test_time(self):
+        expr = parse_one("TIME(7) WITH TIME ZONE", into=exp.DataType, read="presto")
+        self.assertEqual(expr.this, exp.DataType.Type.TIMETZ)
+
         self.validate_identity("FROM_UNIXTIME(a, b)")
         self.validate_identity("FROM_UNIXTIME(a, b, c)")
         self.validate_identity("TRIM(a, b)")
@@ -252,6 +296,12 @@ class TestPresto(Validator):
             },
         )
         self.validate_all(
+            "DATE_ADD('DAY', 1 * -1, x)",
+            write={
+                "presto": "DATE_ADD('DAY', 1 * -1, x)",
+            },
+        )
+        self.validate_all(
             "NOW()",
             write={
                 "presto": "CURRENT_TIMESTAMP",
@@ -300,6 +350,36 @@ class TestPresto(Validator):
             write={
                 "spark": "SELECT FROM_UTC_TIMESTAMP(CAST('2012-10-31 00:00' AS TIMESTAMP), 'America/Sao_Paulo')",
                 "presto": "SELECT CAST('2012-10-31 00:00' AS TIMESTAMP) AT TIME ZONE 'America/Sao_Paulo'",
+            },
+        )
+        self.validate_all(
+            "CAST('2012-10-31 00:00' AS TIMESTAMP) AT TIME ZONE 'America/Sao_Paulo'",
+            read={
+                "spark": "FROM_UTC_TIMESTAMP('2012-10-31 00:00', 'America/Sao_Paulo')",
+            },
+        )
+        self.validate_all(
+            "CAST(x AS TIMESTAMP)",
+            write={"presto": "CAST(x AS TIMESTAMP)"},
+            read={"mysql": "CAST(x AS DATETIME)", "clickhouse": "CAST(x AS DATETIME64)"},
+        )
+        self.validate_all(
+            "CAST(x AS TIMESTAMP)",
+            read={"mysql": "TIMESTAMP(x)"},
+        )
+        self.validate_all(
+            "TIMESTAMP(x, 'America/Los_Angeles')",
+            write={
+                "duckdb": "CAST(x AS TIMESTAMP) AT TIME ZONE 'America/Los_Angeles'",
+                "presto": "CAST(x AS TIMESTAMP) AT TIME ZONE 'America/Los_Angeles'",
+            },
+        )
+        # this case isn't really correct, but it's a fall back for mysql's version
+        self.validate_all(
+            "TIMESTAMP(x, '12:00:00')",
+            write={
+                "duckdb": "TIMESTAMP(x, '12:00:00')",
+                "presto": "TIMESTAMP(x, '12:00:00')",
             },
         )
 
@@ -371,8 +451,24 @@ class TestPresto(Validator):
         self.validate_all(
             "SELECT fname, lname, age FROM person ORDER BY age DESC NULLS FIRST, fname ASC NULLS LAST, lname",
             write={
-                "presto": "SELECT fname, lname, age FROM person ORDER BY age DESC NULLS FIRST, fname, lname",
-                "spark": "SELECT fname, lname, age FROM person ORDER BY age DESC NULLS FIRST, fname NULLS LAST, lname NULLS LAST",
+                "presto": "SELECT fname, lname, age FROM person ORDER BY age DESC NULLS FIRST, fname ASC, lname",
+                "spark": "SELECT fname, lname, age FROM person ORDER BY age DESC NULLS FIRST, fname ASC NULLS LAST, lname NULLS LAST",
+            },
+        )
+
+        self.validate_all(
+            "CREATE OR REPLACE VIEW x (cola) SELECT 1 as cola",
+            write={
+                "spark": "CREATE OR REPLACE VIEW x (cola) AS SELECT 1 AS cola",
+                "presto": "CREATE OR REPLACE VIEW x AS SELECT 1 AS cola",
+            },
+        )
+
+        self.validate_all(
+            'CREATE TABLE IF NOT EXISTS x ("cola" INTEGER, "ds" TEXT) WITH (PARTITIONED BY=("ds"))',
+            write={
+                "spark": "CREATE TABLE IF NOT EXISTS x (`cola` INT, `ds` STRING) PARTITIONED BY (`ds`)",
+                "presto": """CREATE TABLE IF NOT EXISTS x ("cola" INTEGER, "ds" VARCHAR) WITH (PARTITIONED_BY=ARRAY['ds'])""",
             },
         )
 
@@ -443,6 +539,14 @@ class TestPresto(Validator):
 
     @mock.patch("sqlglot.helper.logger")
     def test_presto(self, logger):
+        self.validate_identity("string_agg(x, ',')", "ARRAY_JOIN(ARRAY_AGG(x), ',')")
+        self.validate_identity(
+            "SELECT * FROM example.testdb.customer_orders FOR VERSION AS OF 8954597067493422955"
+        )
+        self.validate_identity(
+            "SELECT * FROM example.testdb.customer_orders FOR TIMESTAMP AS OF CAST('2022-03-23 09:59:29.803 Europe/Vienna' AS TIMESTAMP)"
+        )
+
         self.validate_identity("SELECT * FROM x OFFSET 1 LIMIT 1")
         self.validate_identity("SELECT * FROM x OFFSET 1 FETCH FIRST 1 ROWS ONLY")
         self.validate_identity("SELECT BOOL_OR(a > 10) FROM asd AS T(a)")
@@ -450,7 +554,116 @@ class TestPresto(Validator):
         self.validate_identity("START TRANSACTION READ WRITE, ISOLATION LEVEL SERIALIZABLE")
         self.validate_identity("START TRANSACTION ISOLATION LEVEL REPEATABLE READ")
         self.validate_identity("APPROX_PERCENTILE(a, b, c, d)")
+        self.validate_identity(
+            "SELECT SPLIT_TO_MAP('a:1;b:2;a:3', ';', ':', (k, v1, v2) -> CONCAT(v1, v2))"
+        )
 
+        self.validate_all(
+            "SELECT MAX_BY(a.id, a.timestamp) FROM a",
+            read={
+                "bigquery": "SELECT MAX_BY(a.id, a.timestamp) FROM a",
+                "clickhouse": "SELECT argMax(a.id, a.timestamp) FROM a",
+                "duckdb": "SELECT MAX_BY(a.id, a.timestamp) FROM a",
+                "snowflake": "SELECT MAX_BY(a.id, a.timestamp) FROM a",
+                "spark": "SELECT MAX_BY(a.id, a.timestamp) FROM a",
+                "teradata": "SELECT MAX_BY(a.id, a.timestamp) FROM a",
+            },
+            write={
+                "bigquery": "SELECT MAX_BY(a.id, a.timestamp) FROM a",
+                "clickhouse": "SELECT argMax(a.id, a.timestamp) FROM a",
+                "duckdb": "SELECT ARG_MAX(a.id, a.timestamp) FROM a",
+                "presto": "SELECT MAX_BY(a.id, a.timestamp) FROM a",
+                "snowflake": "SELECT MAX_BY(a.id, a.timestamp) FROM a",
+                "spark": "SELECT MAX_BY(a.id, a.timestamp) FROM a",
+                "teradata": "SELECT MAX_BY(a.id, a.timestamp) FROM a",
+            },
+        )
+        self.validate_all(
+            "SELECT MIN_BY(a.id, a.timestamp, 3) FROM a",
+            write={
+                "clickhouse": "SELECT argMin(a.id, a.timestamp) FROM a",
+                "duckdb": "SELECT ARG_MIN(a.id, a.timestamp) FROM a",
+                "presto": "SELECT MIN_BY(a.id, a.timestamp, 3) FROM a",
+                "snowflake": "SELECT MIN_BY(a.id, a.timestamp, 3) FROM a",
+                "spark": "SELECT MIN_BY(a.id, a.timestamp) FROM a",
+                "teradata": "SELECT MIN_BY(a.id, a.timestamp, 3) FROM a",
+            },
+        )
+        self.validate_all(
+            """JSON '"foo"'""",
+            write={
+                "bigquery": """PARSE_JSON('"foo"')""",
+                "presto": """JSON_PARSE('"foo"')""",
+                "snowflake": """PARSE_JSON('"foo"')""",
+            },
+        )
+        self.validate_all(
+            "SELECT ROW(1, 2)",
+            read={
+                "spark": "SELECT STRUCT(1, 2)",
+            },
+            write={
+                "presto": "SELECT ROW(1, 2)",
+                "spark": "SELECT STRUCT(1, 2)",
+            },
+        )
+        self.validate_all(
+            "ARBITRARY(x)",
+            read={
+                "bigquery": "ANY_VALUE(x)",
+                "clickhouse": "any(x)",
+                "databricks": "ANY_VALUE(x)",
+                "doris": "ANY_VALUE(x)",
+                "drill": "ANY_VALUE(x)",
+                "duckdb": "ANY_VALUE(x)",
+                "hive": "FIRST(x)",
+                "mysql": "ANY_VALUE(x)",
+                "oracle": "ANY_VALUE(x)",
+                "redshift": "ANY_VALUE(x)",
+                "snowflake": "ANY_VALUE(x)",
+                "spark": "ANY_VALUE(x)",
+                "spark2": "FIRST(x)",
+            },
+            write={
+                "bigquery": "ANY_VALUE(x)",
+                "clickhouse": "any(x)",
+                "databricks": "ANY_VALUE(x)",
+                "doris": "ANY_VALUE(x)",
+                "drill": "ANY_VALUE(x)",
+                "duckdb": "ANY_VALUE(x)",
+                "hive": "FIRST(x)",
+                "mysql": "ANY_VALUE(x)",
+                "oracle": "ANY_VALUE(x)",
+                "postgres": "MAX(x)",
+                "presto": "ARBITRARY(x)",
+                "redshift": "ANY_VALUE(x)",
+                "snowflake": "ANY_VALUE(x)",
+                "spark": "ANY_VALUE(x)",
+                "spark2": "FIRST(x)",
+                "sqlite": "MAX(x)",
+                "tsql": "MAX(x)",
+            },
+        )
+        self.validate_all(
+            "STARTS_WITH('abc', 'a')",
+            read={"spark": "STARTSWITH('abc', 'a')"},
+            write={
+                "presto": "STARTS_WITH('abc', 'a')",
+                "snowflake": "STARTSWITH('abc', 'a')",
+                "spark": "STARTSWITH('abc', 'a')",
+            },
+        )
+        self.validate_all(
+            "IS_NAN(x)",
+            read={
+                "spark": "ISNAN(x)",
+            },
+            write={
+                "presto": "IS_NAN(x)",
+                "spark": "ISNAN(x)",
+                "spark2": "ISNAN(x)",
+            },
+        )
         self.validate_all("VALUES 1, 2, 3", write={"presto": "VALUES (1), (2), (3)"})
         self.validate_all("INTERVAL '1 day'", write={"trino": "INTERVAL '1' day"})
         self.validate_all("(5 * INTERVAL '7' day)", read={"": "INTERVAL '5' week"})
@@ -539,7 +752,7 @@ class TestPresto(Validator):
             "SELECT ARRAY[1, 2]",
             write={
                 "bigquery": "SELECT [1, 2]",
-                "duckdb": "SELECT LIST_VALUE(1, 2)",
+                "duckdb": "SELECT [1, 2]",
                 "presto": "SELECT ARRAY[1, 2]",
                 "spark": "SELECT ARRAY(1, 2)",
             },
@@ -677,6 +890,13 @@ class TestPresto(Validator):
             },
         )
         self.validate_all(
+            "JSON_FORMAT(CAST(MAP_FROM_ENTRIES(ARRAY[('action_type', 'at')]) AS JSON))",
+            write={
+                "presto": "JSON_FORMAT(CAST(MAP_FROM_ENTRIES(ARRAY[('action_type', 'at')]) AS JSON))",
+                "spark": "TO_JSON(MAP_FROM_ENTRIES(ARRAY(('action_type', 'at'))))",
+            },
+        )
+        self.validate_all(
             "JSON_FORMAT(x)",
             read={
                 "spark": "TO_JSON(x)",
@@ -691,9 +911,9 @@ class TestPresto(Validator):
         self.validate_all(
             """JSON_FORMAT(JSON '"x"')""",
             write={
-                "bigquery": """TO_JSON_STRING(CAST('"x"' AS JSON))""",
-                "duckdb": """CAST(TO_JSON(CAST('"x"' AS JSON)) AS TEXT)""",
-                "presto": """JSON_FORMAT(CAST('"x"' AS JSON))""",
+                "bigquery": """TO_JSON_STRING(PARSE_JSON('"x"'))""",
+                "duckdb": """CAST(TO_JSON(JSON('"x"')) AS TEXT)""",
+                "presto": """JSON_FORMAT(JSON_PARSE('"x"'))""",
                 "spark": """REGEXP_EXTRACT(TO_JSON(FROM_JSON('["x"]', SCHEMA_OF_JSON('["x"]'))), '^.(.*).$', 1)""",
             },
         )
@@ -711,46 +931,44 @@ class TestPresto(Validator):
         )
 
     def test_encode_decode(self):
+        self.validate_identity("FROM_UTF8(x, y)")
+
         self.validate_all(
             "TO_UTF8(x)",
+            read={
+                "duckdb": "ENCODE(x)",
+                "spark": "ENCODE(x, 'utf-8')",
+            },
             write={
+                "duckdb": "ENCODE(x)",
+                "presto": "TO_UTF8(x)",
                 "spark": "ENCODE(x, 'utf-8')",
             },
         )
         self.validate_all(
             "FROM_UTF8(x)",
-            write={
+            read={
+                "duckdb": "DECODE(x)",
                 "spark": "DECODE(x, 'utf-8')",
             },
-        )
-        self.validate_all(
-            "FROM_UTF8(x, y)",
             write={
-                "presto": "FROM_UTF8(x, y)",
-            },
-        )
-        self.validate_all(
-            "ENCODE(x, 'utf-8')",
-            write={
-                "presto": "TO_UTF8(x)",
-            },
-        )
-        self.validate_all(
-            "DECODE(x, 'utf-8')",
-            write={
+                "duckdb": "DECODE(x)",
                 "presto": "FROM_UTF8(x)",
+                "spark": "DECODE(x, 'utf-8')",
             },
         )
         self.validate_all(
             "ENCODE(x, 'invalid')",
             write={
                 "presto": UnsupportedError,
+                "duckdb": UnsupportedError,
             },
         )
         self.validate_all(
             "DECODE(x, 'invalid')",
             write={
                 "presto": UnsupportedError,
+                "duckdb": UnsupportedError,
             },
         )
 
@@ -785,14 +1003,14 @@ class TestPresto(Validator):
             "SELECT CAST(JSON '[1,23,456]' AS ARRAY(INTEGER))",
             write={
                 "spark": "SELECT FROM_JSON('[1,23,456]', 'ARRAY<INT>')",
-                "presto": "SELECT CAST(CAST('[1,23,456]' AS JSON) AS ARRAY(INTEGER))",
+                "presto": "SELECT CAST(JSON_PARSE('[1,23,456]') AS ARRAY(INTEGER))",
             },
         )
         self.validate_all(
             """SELECT CAST(JSON '{"k1":1,"k2":23,"k3":456}' AS MAP(VARCHAR, INTEGER))""",
             write={
                 "spark": 'SELECT FROM_JSON(\'{"k1":1,"k2":23,"k3":456}\', \'MAP<STRING, INT>\')',
-                "presto": 'SELECT CAST(CAST(\'{"k1":1,"k2":23,"k3":456}\' AS JSON) AS MAP(VARCHAR, INTEGER))',
+                "presto": 'SELECT CAST(JSON_PARSE(\'{"k1":1,"k2":23,"k3":456}\') AS MAP(VARCHAR, INTEGER))',
             },
         )
 
@@ -802,44 +1020,6 @@ class TestPresto(Validator):
                 "spark": "SELECT TO_JSON(ARRAY(1, 23, 456))",
                 "presto": "SELECT CAST(ARRAY[1, 23, 456] AS JSON)",
             },
-        )
-
-    def test_explode_to_unnest(self):
-        self.validate_all(
-            "SELECT col FROM tbl CROSS JOIN UNNEST(x) AS _u(col)",
-            read={"spark": "SELECT EXPLODE(x) FROM tbl"},
-        )
-        self.validate_all(
-            "SELECT col_2 FROM _u CROSS JOIN UNNEST(col) AS _u_2(col_2)",
-            read={"spark": "SELECT EXPLODE(col) FROM _u"},
-        )
-        self.validate_all(
-            "SELECT exploded FROM schema.tbl CROSS JOIN UNNEST(col) AS _u(exploded)",
-            read={"spark": "SELECT EXPLODE(col) AS exploded FROM schema.tbl"},
-        )
-        self.validate_all(
-            "SELECT col FROM UNNEST(SEQUENCE(1, 2)) AS _u(col)",
-            read={"spark": "SELECT EXPLODE(SEQUENCE(1, 2))"},
-        )
-        self.validate_all(
-            "SELECT col FROM tbl AS t CROSS JOIN UNNEST(t.c) AS _u(col)",
-            read={"spark": "SELECT EXPLODE(t.c) FROM tbl t"},
-        )
-        self.validate_all(
-            "SELECT pos, col FROM UNNEST(SEQUENCE(2, 3)) WITH ORDINALITY AS _u(col, pos)",
-            read={"spark": "SELECT POSEXPLODE(SEQUENCE(2, 3))"},
-        )
-        self.validate_all(
-            "SELECT pos, col FROM tbl CROSS JOIN UNNEST(SEQUENCE(2, 3)) WITH ORDINALITY AS _u(col, pos)",
-            read={"spark": "SELECT POSEXPLODE(SEQUENCE(2, 3)) FROM tbl"},
-        )
-        self.validate_all(
-            "SELECT pos, col FROM tbl AS t CROSS JOIN UNNEST(t.c) WITH ORDINALITY AS _u(col, pos)",
-            read={"spark": "SELECT POSEXPLODE(t.c) FROM tbl t"},
-        )
-        self.validate_all(
-            "SELECT col, pos, pos_2, col_2 FROM _u CROSS JOIN UNNEST(SEQUENCE(2, 3)) WITH ORDINALITY AS _u_2(col_2, pos_2)",
-            read={"spark": "SELECT col, pos, POSEXPLODE(SEQUENCE(2, 3)) FROM _u"},
         )
 
     def test_match_recognize(self):

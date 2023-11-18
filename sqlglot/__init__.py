@@ -22,6 +22,7 @@ from sqlglot.expressions import (
     Expression as Expression,
     alias_ as alias,
     and_ as and_,
+    case as case,
     cast as cast,
     column as column,
     condition as condition,
@@ -67,19 +68,22 @@ schema = MappingSchema()
 """The default schema used by SQLGlot (e.g. in the optimizer)."""
 
 
-def parse(sql: str, read: DialectType = None, **opts) -> t.List[t.Optional[Expression]]:
+def parse(
+    sql: str, read: DialectType = None, dialect: DialectType = None, **opts
+) -> t.List[t.Optional[Expression]]:
     """
     Parses the given SQL string into a collection of syntax trees, one per parsed SQL statement.
 
     Args:
         sql: the SQL code string to parse.
         read: the SQL dialect to apply during parsing (eg. "spark", "hive", "presto", "mysql").
+        dialect: the SQL dialect (alias for read).
         **opts: other `sqlglot.parser.Parser` options.
 
     Returns:
         The resulting syntax tree collection.
     """
-    dialect = Dialect.get_or_raise(read)()
+    dialect = Dialect.get_or_raise(read or dialect)()
     return dialect.parse(sql, **opts)
 
 
@@ -155,6 +159,6 @@ def transpile(
     """
     write = (read if write is None else write) if identity else write
     return [
-        Dialect.get_or_raise(write)().generate(expression, **opts)
+        Dialect.get_or_raise(write)().generate(expression, copy=False, **opts) if expression else ""
         for expression in parse(sql, read, error_level=error_level)
     ]

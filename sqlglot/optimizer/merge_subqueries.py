@@ -128,7 +128,7 @@ def _mergeable(outer_scope, inner_scope, leave_tables_isolated, from_or_join):
     def _is_a_window_expression_in_unmergable_operation():
         window_expressions = inner_select.find_all(exp.Window)
         window_alias_names = {window.parent.alias_or_name for window in window_expressions}
-        inner_select_name = inner_select.parent.alias_or_name
+        inner_select_name = from_or_join.alias_or_name
         unmergable_window_columns = [
             column
             for column in outer_scope.columns
@@ -176,22 +176,23 @@ def _mergeable(outer_scope, inner_scope, leave_tables_isolated, from_or_join):
 
     return (
         isinstance(outer_scope.expression, exp.Select)
+        and not outer_scope.expression.is_star
         and isinstance(inner_select, exp.Select)
         and not any(inner_select.args.get(arg) for arg in UNMERGABLE_ARGS)
         and inner_select.args.get("from")
         and not outer_scope.pivots
-        and not any(e.find(exp.AggFunc, exp.Select) for e in inner_select.expressions)
+        and not any(e.find(exp.AggFunc, exp.Select, exp.Explode) for e in inner_select.expressions)
         and not (leave_tables_isolated and len(outer_scope.selected_sources) > 1)
         and not (
             isinstance(from_or_join, exp.Join)
             and inner_select.args.get("where")
-            and from_or_join.side in {"FULL", "LEFT", "RIGHT"}
+            and from_or_join.side in ("FULL", "LEFT", "RIGHT")
         )
         and not (
             isinstance(from_or_join, exp.From)
             and inner_select.args.get("where")
             and any(
-                j.side in {"FULL", "RIGHT"} for j in outer_scope.expression.args.get("joins", [])
+                j.side in ("FULL", "RIGHT") for j in outer_scope.expression.args.get("joins", [])
             )
         )
         and not _outer_select_joins_on_inner_select_join()
@@ -242,6 +243,7 @@ def _merge_from(outer_scope, inner_scope, node_to_replace, alias):
         alias (str)
     """
     new_subquery = inner_scope.expression.args["from"].this
+    new_subquery.set("joins", node_to_replace.args.get("joins"))
     node_to_replace.replace(new_subquery)
     for join_hint in outer_scope.join_hints:
         tables = join_hint.find_all(exp.Table)

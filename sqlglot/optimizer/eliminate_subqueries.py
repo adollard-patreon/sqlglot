@@ -136,15 +136,19 @@ def _eliminate_union(scope, existing_ctes, taken):
 
 
 def _eliminate_derived_table(scope, existing_ctes, taken):
-    # This ensures we don't drop the "pivot" arg from a pivoted subquery
-    if scope.parent.pivots:
+    # This makes sure that we don't:
+    # - drop the "pivot" arg from a pivoted subquery
+    # - eliminate a lateral correlated subquery
+    if scope.parent.pivots or isinstance(scope.parent.expression, exp.Lateral):
         return None
 
-    parent = scope.expression.parent
+    # Get rid of redundant exp.Subquery expressions, i.e. those that are just used as wrappers
+    to_replace = scope.expression.parent.unwrap()
     name, cte = _new_cte(scope, existing_ctes, taken)
+    table = exp.alias_(exp.table_(name), alias=to_replace.alias or name)
+    table.set("joins", to_replace.args.get("joins"))
 
-    table = exp.alias_(exp.table_(name), alias=parent.alias or name)
-    parent.replace(table)
+    to_replace.replace(table)
 
     return cte
 

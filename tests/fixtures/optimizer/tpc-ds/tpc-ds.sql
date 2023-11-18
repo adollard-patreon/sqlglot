@@ -857,7 +857,7 @@ WITH "salesreturns" AS (
 ), "cte_10" AS (
   SELECT
     'catalog channel' AS "channel",
-    'catalog_page' || "csr"."cp_catalog_page_id" AS "id",
+    CONCAT('catalog_page', "csr"."cp_catalog_page_id") AS "id",
     "csr"."sales" AS "sales",
     "csr"."returns1" AS "returns1",
     "csr"."profit" - "csr"."profit_loss" AS "profit"
@@ -865,7 +865,7 @@ WITH "salesreturns" AS (
   UNION ALL
   SELECT
     'web channel' AS "channel",
-    'web_site' || "wsr"."web_site_id" AS "id",
+    CONCAT('web_site', "wsr"."web_site_id") AS "id",
     "wsr"."sales" AS "sales",
     "wsr"."returns1" AS "returns1",
     "wsr"."profit" - "wsr"."profit_loss" AS "profit"
@@ -873,7 +873,7 @@ WITH "salesreturns" AS (
 ), "x" AS (
   SELECT
     'store channel' AS "channel",
-    'store' || "ssr"."s_store_id" AS "id",
+    CONCAT('store', "ssr"."s_store_id") AS "id",
     "ssr"."sales" AS "sales",
     "ssr"."returns1" AS "returns1",
     "ssr"."profit" - "ssr"."profit_loss" AS "profit"
@@ -1449,11 +1449,31 @@ WITH "_u_0" AS (
     "store_sales"."ss_quantity" <= 80 AND "store_sales"."ss_quantity" >= 61
 )
 SELECT
-  CASE WHEN "_u_0"."_col_0" > 3672 THEN "_u_1"."_col_0" ELSE "_u_2"."_col_0" END AS "bucket1",
-  CASE WHEN "_u_3"."_col_0" > 3392 THEN "_u_4"."_col_0" ELSE "_u_5"."_col_0" END AS "bucket2",
-  CASE WHEN "_u_6"."_col_0" > 32784 THEN "_u_7"."_col_0" ELSE "_u_8"."_col_0" END AS "bucket3",
-  CASE WHEN "_u_9"."_col_0" > 26032 THEN "_u_10"."_col_0" ELSE "_u_11"."_col_0" END AS "bucket4",
-  CASE WHEN "_u_12"."_col_0" > 23982 THEN "_u_13"."_col_0" ELSE "_u_14"."_col_0" END AS "bucket5"
+  CASE
+    WHEN MAX("_u_0"."_col_0") > 3672
+    THEN MAX("_u_1"."_col_0")
+    ELSE MAX("_u_2"."_col_0")
+  END AS "bucket1",
+  CASE
+    WHEN MAX("_u_3"."_col_0") > 3392
+    THEN MAX("_u_4"."_col_0")
+    ELSE MAX("_u_5"."_col_0")
+  END AS "bucket2",
+  CASE
+    WHEN MAX("_u_6"."_col_0") > 32784
+    THEN MAX("_u_7"."_col_0")
+    ELSE MAX("_u_8"."_col_0")
+  END AS "bucket3",
+  CASE
+    WHEN MAX("_u_9"."_col_0") > 26032
+    THEN MAX("_u_10"."_col_0")
+    ELSE MAX("_u_11"."_col_0")
+  END AS "bucket4",
+  CASE
+    WHEN MAX("_u_12"."_col_0") > 23982
+    THEN MAX("_u_13"."_col_0")
+    ELSE MAX("_u_14"."_col_0")
+  END AS "bucket5"
 FROM "reason" AS "reason"
 CROSS JOIN "_u_0" AS "_u_0"
 CROSS JOIN "_u_1" AS "_u_1"
@@ -2009,18 +2029,33 @@ JOIN "date_dim" AS "date_dim"
   ON "date_dim"."d_year" = 2001
   AND "store_sales"."ss_sold_date_sk" = "date_dim"."d_date_sk"
 JOIN "household_demographics" AS "household_demographics"
-  ON "customer_demographics"."cd_demo_sk" = "store_sales"."ss_cdemo_sk"
-  AND "customer_demographics"."cd_education_status" = 'Advanced Degree'
-  AND "customer_demographics"."cd_education_status" = 'Primary'
-  AND "customer_demographics"."cd_education_status" = 'Secondary'
-  AND "customer_demographics"."cd_marital_status" = 'D'
-  AND "customer_demographics"."cd_marital_status" = 'M'
-  AND "customer_demographics"."cd_marital_status" = 'U'
-  AND "household_demographics"."hd_dep_count" = 1
-  AND "household_demographics"."hd_dep_count" = 3
-  AND "store_sales"."ss_hdemo_sk" = "household_demographics"."hd_demo_sk"
-  AND "store_sales"."ss_sales_price" <= 100.00
-  AND "store_sales"."ss_sales_price" >= 150.00
+  ON (
+    "customer_demographics"."cd_demo_sk" = "store_sales"."ss_cdemo_sk"
+    AND "customer_demographics"."cd_education_status" = 'Advanced Degree'
+    AND "customer_demographics"."cd_marital_status" = 'U'
+    AND "household_demographics"."hd_dep_count" = 3
+    AND "store_sales"."ss_hdemo_sk" = "household_demographics"."hd_demo_sk"
+    AND "store_sales"."ss_sales_price" <= 150.00
+    AND "store_sales"."ss_sales_price" >= 100.00
+  )
+  OR (
+    "customer_demographics"."cd_demo_sk" = "store_sales"."ss_cdemo_sk"
+    AND "customer_demographics"."cd_education_status" = 'Primary'
+    AND "customer_demographics"."cd_marital_status" = 'M'
+    AND "household_demographics"."hd_dep_count" = 1
+    AND "store_sales"."ss_hdemo_sk" = "household_demographics"."hd_demo_sk"
+    AND "store_sales"."ss_sales_price" <= 100.00
+    AND "store_sales"."ss_sales_price" >= 50.00
+  )
+  OR (
+    "customer_demographics"."cd_demo_sk" = "store_sales"."ss_cdemo_sk"
+    AND "customer_demographics"."cd_education_status" = 'Secondary'
+    AND "customer_demographics"."cd_marital_status" = 'D'
+    AND "household_demographics"."hd_dep_count" = 1
+    AND "store_sales"."ss_hdemo_sk" = "household_demographics"."hd_demo_sk"
+    AND "store_sales"."ss_sales_price" <= 200.00
+    AND "store_sales"."ss_sales_price" >= 150.00
+  )
 JOIN "store" AS "store"
   ON "store"."s_store_sk" = "store_sales"."ss_store_sk";
 
@@ -2512,8 +2547,8 @@ JOIN "date_dim" AS "date_dim"
   )
 WHERE
   "_u_3"."_u_4" IS NULL
-  AND ARRAY_ANY("_u_0"."_u_2", "_x" -> "cs1"."cs_warehouse_sk" <> "_x")
   AND NOT "_u_0"."_u_1" IS NULL
+  AND ARRAY_ANY("_u_0"."_u_2", "_x" -> "cs1"."cs_warehouse_sk" <> "_x")
 ORDER BY
   COUNT(DISTINCT "cs1"."cs_order_number")
 LIMIT 100;
@@ -4773,10 +4808,10 @@ WITH "foo" AS (
     "foo"."i_item_sk" AS "i_item_sk",
     "foo"."d_moy" AS "d_moy",
     "foo"."mean" AS "mean",
-    CASE "foo"."mean" WHEN 0 THEN NULL ELSE "foo"."stdev" / "foo"."mean" END AS "cov"
+    CASE WHEN "foo"."mean" = 0 THEN NULL ELSE "foo"."stdev" / "foo"."mean" END AS "cov"
   FROM "foo" AS "foo"
   WHERE
-    CASE "foo"."mean" WHEN 0 THEN 0 ELSE "foo"."stdev" / "foo"."mean" END > 1
+    CASE WHEN "foo"."mean" = 0 THEN 0 ELSE "foo"."stdev" / "foo"."mean" END > 1
 )
 SELECT
   "inv1"."w_warehouse_sk" AS "w_warehouse_sk",
@@ -8591,7 +8626,7 @@ WITH "date_dim_2" AS (
     "warehouse"."w_county" AS "w_county",
     "warehouse"."w_state" AS "w_state",
     "warehouse"."w_country" AS "w_country",
-    'ZOUROS' || ',' || 'ZHOU' AS "ship_carriers",
+    'ZOUROS,ZHOU' AS "ship_carriers",
     "date_dim"."d_year" AS "year1",
     SUM(
       CASE
@@ -8786,7 +8821,7 @@ WITH "date_dim_2" AS (
     "warehouse"."w_county" AS "w_county",
     "warehouse"."w_state" AS "w_state",
     "warehouse"."w_country" AS "w_country",
-    'ZOUROS' || ',' || 'ZHOU' AS "ship_carriers",
+    'ZOUROS,ZHOU' AS "ship_carriers",
     "date_dim"."d_year" AS "year1",
     SUM(
       CASE
@@ -9755,7 +9790,7 @@ JOIN "date_dim" AS "d1"
   ON "catalog_sales"."cs_sold_date_sk" = "d1"."d_date_sk"
   AND "d1"."d_week_seq" = "d2"."d_week_seq"
   AND "d1"."d_year" = 2002
-  AND "d3"."d_date" > CONCAT("d1"."d_date", INTERVAL '5' day)
+  AND "d3"."d_date" > "d1"."d_date" + INTERVAL '5' day
 GROUP BY
   "item"."i_item_desc",
   "warehouse"."w_warehouse_name",
@@ -10813,9 +10848,11 @@ LEFT JOIN "ws"
   AND "ws"."ws_item_sk" = "ss"."ss_item_sk"
   AND "ws"."ws_sold_year" = "ss"."ss_sold_year"
 WHERE
-  "ss"."ss_sold_year" = 1999
-  AND COALESCE("cs"."cs_qty", 0) > 0
-  AND COALESCE("ws"."ws_qty", 0) > 0
+  "cs"."cs_qty" > 0
+  AND "ss"."ss_sold_year" = 1999
+  AND "ws"."ws_qty" > 0
+  AND NOT "cs"."cs_qty" IS NULL
+  AND NOT "ws"."ws_qty" IS NULL
 ORDER BY
   "ss_item_sk",
   "ss"."ss_qty" DESC,
@@ -11101,7 +11138,7 @@ WITH "date_dim_2" AS (
 ), "cte_4" AS (
   SELECT
     'catalog channel' AS "channel",
-    'catalog_page' || "csr"."catalog_page_id" AS "id",
+    CONCAT('catalog_page', "csr"."catalog_page_id") AS "id",
     "csr"."sales" AS "sales",
     "csr"."returns1" AS "returns1",
     "csr"."profit" AS "profit"
@@ -11109,7 +11146,7 @@ WITH "date_dim_2" AS (
   UNION ALL
   SELECT
     'web channel' AS "channel",
-    'web_site' || "wsr"."web_site_id" AS "id",
+    CONCAT('web_site', "wsr"."web_site_id") AS "id",
     "wsr"."sales" AS "sales",
     "wsr"."returns1" AS "returns1",
     "wsr"."profit" AS "profit"
@@ -11117,7 +11154,7 @@ WITH "date_dim_2" AS (
 ), "x" AS (
   SELECT
     'store channel' AS "channel",
-    'store' || "ssr"."store_id" AS "id",
+    CONCAT('store', "ssr"."store_id") AS "id",
     "ssr"."sales" AS "sales",
     "ssr"."returns1" AS "returns1",
     "ssr"."profit" AS "profit"
@@ -11549,7 +11586,7 @@ ORDER  BY c_customer_id
 LIMIT 100;
 SELECT
   "customer"."c_customer_id" AS "customer_id",
-  "customer"."c_last_name" || ', ' || "customer"."c_first_name" AS "customername"
+  CONCAT("customer"."c_last_name", ', ', "customer"."c_first_name") AS "customername"
 FROM "customer" AS "customer"
 JOIN "customer_address" AS "customer_address"
   ON "customer"."c_current_addr_sk" = "customer_address"."ca_address_sk"
@@ -12549,8 +12586,8 @@ JOIN "web_site" AS "web_site"
   AND "ws1"."ws_web_site_sk" = "web_site"."web_site_sk"
 WHERE
   "_u_3"."_u_4" IS NULL
-  AND ARRAY_ANY("_u_0"."_u_2", "_x" -> "ws1"."ws_warehouse_sk" <> "_x")
   AND NOT "_u_0"."_u_1" IS NULL
+  AND ARRAY_ANY("_u_0"."_u_2", "_x" -> "ws1"."ws_warehouse_sk" <> "_x")
 ORDER BY
   COUNT(DISTINCT "ws1"."ws_order_number")
 LIMIT 100;

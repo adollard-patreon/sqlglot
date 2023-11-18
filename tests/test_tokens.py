@@ -1,10 +1,23 @@
 import unittest
 
 from sqlglot.dialects import BigQuery
+from sqlglot.errors import TokenError
 from sqlglot.tokens import Tokenizer, TokenType
 
 
 class TestTokens(unittest.TestCase):
+    def test_space_keywords(self):
+        for string, length in (
+            ("group bys", 2),
+            (" group bys", 2),
+            (" group bys ", 2),
+            ("group by)", 2),
+            ("group bys)", 3),
+        ):
+            tokens = Tokenizer().tokenize(string)
+            self.assertTrue("GROUP" in tokens[0].text.upper())
+            self.assertEqual(len(tokens), length)
+
     def test_comment_attachment(self):
         tokenizer = Tokenizer()
         sql_comment = [
@@ -16,6 +29,7 @@ class TestTokens(unittest.TestCase):
             ("foo /*comment 1*/ /*comment 2*/", ["comment 1", "comment 2"]),
             ("foo\n-- comment", [" comment"]),
             ("1 /*/2 */", ["/2 "]),
+            ("1\n/*comment*/;", ["comment"]),
         ]
 
         for sql, comment in sql_comment:
@@ -65,7 +79,7 @@ x"""
         self.assertEqual(tokens[3].token_type, TokenType.SEMICOLON)
 
     def test_error_msg(self):
-        with self.assertRaisesRegex(ValueError, "Error tokenizing 'select /'"):
+        with self.assertRaisesRegex(TokenError, "Error tokenizing 'select /'"):
             Tokenizer().tokenize("select /*")
 
     def test_jinja(self):

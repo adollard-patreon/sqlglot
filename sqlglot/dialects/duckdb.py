@@ -6,14 +6,20 @@ from sqlglot import exp, generator, parser, tokens
 from sqlglot.dialects.dialect import (
     Dialect,
     approx_count_distinct_sql,
+    arg_max_or_min_no_count,
     arrow_json_extract_scalar_sql,
     arrow_json_extract_sql,
+    binary_from_function,
+    bool_xor_sql,
     date_trunc_to_time,
     datestrtodate_sql,
+    encode_decode_sql,
     format_time_lambda,
+    inline_array_sql,
     no_comment_column_constraint_sql,
     no_properties_sql,
     no_safe_divide_sql,
+    no_timestamp_sql,
     pivot_column_names,
     regexp_extract_sql,
     rename_func,
@@ -27,13 +33,13 @@ from sqlglot.helper import seq_get
 from sqlglot.tokens import TokenType
 
 
-def _ts_or_ds_add_sql(self: generator.Generator, expression: exp.TsOrDsAdd) -> str:
+def _ts_or_ds_add_sql(self: DuckDB.Generator, expression: exp.TsOrDsAdd) -> str:
     this = self.sql(expression, "this")
     unit = self.sql(expression, "unit").strip("'") or "DAY"
     return f"CAST({this} AS DATE) + {self.sql(exp.Interval(this=expression.expression, unit=unit))}"
 
 
-def _date_delta_sql(self: generator.Generator, expression: exp.DateAdd | exp.DateSub) -> str:
+def _date_delta_sql(self: DuckDB.Generator, expression: exp.DateAdd | exp.DateSub) -> str:
     this = self.sql(expression, "this")
     unit = self.sql(expression, "unit").strip("'") or "DAY"
     op = "+" if isinstance(expression, exp.DateAdd) else "-"
@@ -41,7 +47,7 @@ def _date_delta_sql(self: generator.Generator, expression: exp.DateAdd | exp.Dat
 
 
 # BigQuery -> DuckDB conversion for the DATE function
-def _date_sql(self: generator.Generator, expression: exp.Date) -> str:
+def _date_sql(self: DuckDB.Generator, expression: exp.Date) -> str:
     result = f"CAST({self.sql(expression, 'this')} AS DATE)"
     zone = self.sql(expression, "zone")
 
@@ -55,13 +61,13 @@ def _date_sql(self: generator.Generator, expression: exp.Date) -> str:
     return result
 
 
-def _array_sort_sql(self: generator.Generator, expression: exp.ArraySort) -> str:
+def _array_sort_sql(self: DuckDB.Generator, expression: exp.ArraySort) -> str:
     if expression.expression:
         self.unsupported("DUCKDB ARRAY_SORT does not support a comparator")
     return f"ARRAY_SORT({self.sql(expression, 'this')})"
 
 
-def _sort_array_sql(self: generator.Generator, expression: exp.SortArray) -> str:
+def _sort_array_sql(self: DuckDB.Generator, expression: exp.SortArray) -> str:
     this = self.sql(expression, "this")
     if expression.args.get("asc") == exp.false():
         return f"ARRAY_REVERSE_SORT({this})"
@@ -76,26 +82,34 @@ def _parse_date_diff(args: t.List) -> exp.Expression:
     return exp.DateDiff(this=seq_get(args, 2), expression=seq_get(args, 1), unit=seq_get(args, 0))
 
 
-def _struct_sql(self: generator.Generator, expression: exp.Struct) -> str:
+def _struct_sql(self: DuckDB.Generator, expression: exp.Struct) -> str:
     args = [
-        f"'{e.name or e.this.name}': {self.sql(e, 'expression')}" for e in expression.expressions
+        f"'{e.name or e.this.name}': {self.sql(e.expressions[0]) if isinstance(e, exp.Bracket) else self.sql(e, 'expression')}"
+        for e in expression.expressions
     ]
     return f"{{{', '.join(args)}}}"
 
 
-def _datatype_sql(self: generator.Generator, expression: exp.DataType) -> str:
+def _datatype_sql(self: DuckDB.Generator, expression: exp.DataType) -> str:
     if expression.is_type("array"):
         return f"{self.expressions(expression, flat=True)}[]"
+
+    # Type TIMESTAMP / TIME WITH TIME ZONE does not support any modifiers
+    if expression.is_type("timestamptz", "timetz"):
+        return expression.this.value
+
     return self.datatype_sql(expression)
 
 
-def _json_format_sql(self: generator.Generator, expression: exp.JSONFormat) -> str:
+def _json_format_sql(self: DuckDB.Generator, expression: exp.JSONFormat) -> str:
     sql = self.func("TO_JSON", expression.this, expression.args.get("options"))
     return f"CAST({sql} AS TEXT)"
 
 
 class DuckDB(Dialect):
     NULL_ORDERING = "nulls_are_last"
+    SUPPORTS_USER_DEFINED_TYPES = False
+    SAFE_DIVISION = True
 
     # https://duckdb.org/docs/sql/introduction.html#creating-a-new-table
     RESOLVES_IDENTIFIERS_AS_UPPERCASE = None
@@ -103,19 +117,16 @@ class DuckDB(Dialect):
     class Tokenizer(tokens.Tokenizer):
         KEYWORDS = {
             **tokens.Tokenizer.KEYWORDS,
-            "~": TokenType.RLIKE,
-            ":=": TokenType.EQ,
+            ":=": TokenType.COLON_EQ,
             "//": TokenType.DIV,
             "ATTACH": TokenType.COMMAND,
             "BINARY": TokenType.VARBINARY,
-            "BPCHAR": TokenType.TEXT,
             "BITSTRING": TokenType.BIT,
+            "BPCHAR": TokenType.TEXT,
             "CHAR": TokenType.TEXT,
             "CHARACTER VARYING": TokenType.TEXT,
             "EXCLUDE": TokenType.EXCEPT,
-            "INT1": TokenType.TINYINT,
             "LOGICAL": TokenType.BOOLEAN,
-            "NUMERIC": TokenType.DOUBLE,
             "PIVOT_WIDER": TokenType.PIVOT,
             "SIGNED": TokenType.INT,
             "STRING": TokenType.VARCHAR,
@@ -123,10 +134,19 @@ class DuckDB(Dialect):
             "UINTEGER": TokenType.UINT,
             "USMALLINT": TokenType.USMALLINT,
             "UTINYINT": TokenType.UTINYINT,
+            "TIMESTAMP_S": TokenType.TIMESTAMP_S,
+            "TIMESTAMP_MS": TokenType.TIMESTAMP_MS,
+            "TIMESTAMP_NS": TokenType.TIMESTAMP_NS,
+            "TIMESTAMP_US": TokenType.TIMESTAMP,
         }
 
     class Parser(parser.Parser):
         CONCAT_NULL_OUTPUTS_STRING = True
+
+        BITWISE = {
+            **parser.Parser.BITWISE,
+            TokenType.TILDA: exp.RegexpLike,
+        }
 
         FUNCTIONS = {
             **parser.Parser.FUNCTIONS,
@@ -144,10 +164,21 @@ class DuckDB(Dialect):
             "LIST_REVERSE_SORT": _sort_array_reverse,
             "LIST_SORT": exp.SortArray.from_arg_list,
             "LIST_VALUE": exp.Array.from_arg_list,
+            "MEDIAN": lambda args: exp.PercentileCont(
+                this=seq_get(args, 0), expression=exp.Literal.number(0.5)
+            ),
+            "QUANTILE_CONT": exp.PercentileCont.from_arg_list,
+            "QUANTILE_DISC": exp.PercentileDisc.from_arg_list,
             "REGEXP_EXTRACT": lambda args: exp.RegexpExtract(
                 this=seq_get(args, 0), expression=seq_get(args, 1), group=seq_get(args, 2)
             ),
             "REGEXP_MATCHES": exp.RegexpLike.from_arg_list,
+            "REGEXP_REPLACE": lambda args: exp.RegexpReplace(
+                this=seq_get(args, 0),
+                expression=seq_get(args, 1),
+                replacement=seq_get(args, 2),
+                modifiers=seq_get(args, 3),
+            ),
             "STRFTIME": format_time_lambda(exp.TimeToStr, "duckdb"),
             "STRING_SPLIT": exp.Split.from_arg_list,
             "STRING_SPLIT_REGEX": exp.RegexpSplit.from_arg_list,
@@ -158,15 +189,44 @@ class DuckDB(Dialect):
             "STR_SPLIT_REGEX": exp.RegexpSplit.from_arg_list,
             "TO_TIMESTAMP": exp.UnixToTime.from_arg_list,
             "UNNEST": exp.Explode.from_arg_list,
+            "XOR": binary_from_function(exp.BitwiseXor),
         }
 
-        TYPE_TOKENS = {
-            *parser.Parser.TYPE_TOKENS,
-            TokenType.UBIGINT,
-            TokenType.UINT,
-            TokenType.USMALLINT,
-            TokenType.UTINYINT,
+        FUNCTION_PARSERS = {
+            **parser.Parser.FUNCTION_PARSERS,
+            "DECODE": lambda self: self.expression(
+                exp.Decode, this=self._parse_conjunction(), charset=exp.Literal.string("utf-8")
+            ),
+            "ENCODE": lambda self: self.expression(
+                exp.Encode, this=self._parse_conjunction(), charset=exp.Literal.string("utf-8")
+            ),
         }
+
+        TABLE_ALIAS_TOKENS = parser.Parser.TABLE_ALIAS_TOKENS - {
+            TokenType.SEMI,
+            TokenType.ANTI,
+        }
+
+        def _parse_types(
+            self, check_func: bool = False, schema: bool = False, allow_identifiers: bool = True
+        ) -> t.Optional[exp.Expression]:
+            this = super()._parse_types(
+                check_func=check_func, schema=schema, allow_identifiers=allow_identifiers
+            )
+
+            # DuckDB treats NUMERIC and DECIMAL without precision as DECIMAL(18, 3)
+            # See: https://duckdb.org/docs/sql/data_types/numeric
+            if (
+                isinstance(this, exp.DataType)
+                and this.is_type("numeric", "decimal")
+                and not this.expressions
+            ):
+                return exp.DataType.build("DECIMAL(18, 3)")
+
+            return this
+
+        def _parse_struct_types(self) -> t.Optional[exp.Expression]:
+            return self._parse_field_def()
 
         def _pivot_column_names(self, aggregations: t.List[exp.Expression]) -> t.List[str]:
             if len(aggregations) == 1:
@@ -180,16 +240,21 @@ class DuckDB(Dialect):
         LIMIT_FETCH = "LIMIT"
         STRUCT_DELIMITER = ("(", ")")
         RENAME_TABLE_WITH_DB = False
+        NVL2_SUPPORTED = False
+        SEMI_ANTI_JOIN_WITH_SIDE = False
 
         TRANSFORMS = {
             **generator.Generator.TRANSFORMS,
             exp.ApproxDistinct: approx_count_distinct_sql,
             exp.Array: lambda self, e: self.func("ARRAY", e.expressions[0])
             if e.expressions and e.expressions[0].find(exp.Select)
-            else rename_func("LIST_VALUE")(self, e),
+            else inline_array_sql(self, e),
             exp.ArraySize: rename_func("ARRAY_LENGTH"),
+            exp.ArgMax: arg_max_or_min_no_count("ARG_MAX"),
+            exp.ArgMin: arg_max_or_min_no_count("ARG_MIN"),
             exp.ArraySort: _array_sort_sql,
             exp.ArraySum: rename_func("LIST_SUM"),
+            exp.BitwiseXor: rename_func("XOR"),
             exp.CommentColumnConstraint: no_comment_column_constraint_sql,
             exp.CurrentDate: lambda self, e: "CURRENT_DATE",
             exp.CurrentTime: lambda self, e: "CURRENT_TIME",
@@ -203,13 +268,17 @@ class DuckDB(Dialect):
             exp.DateFromParts: rename_func("MAKE_DATE"),
             exp.DateSub: _date_delta_sql,
             exp.DateDiff: lambda self, e: self.func(
-                "DATE_DIFF", f"'{e.args.get('unit', 'day')}'", e.expression, e.this
+                "DATE_DIFF", f"'{e.args.get('unit') or 'day'}'", e.expression, e.this
             ),
             exp.DateStrToDate: datestrtodate_sql,
             exp.DateToDi: lambda self, e: f"CAST(STRFTIME({self.sql(e, 'this')}, {DuckDB.DATEINT_FORMAT}) AS INT)",
+            exp.Decode: lambda self, e: encode_decode_sql(self, e, "DECODE", replace=False),
             exp.DiToDate: lambda self, e: f"CAST(STRPTIME(CAST({self.sql(e, 'this')} AS TEXT), {DuckDB.DATEINT_FORMAT}) AS DATE)",
+            exp.Encode: lambda self, e: encode_decode_sql(self, e, "ENCODE", replace=False),
             exp.Explode: rename_func("UNNEST"),
             exp.IntDiv: lambda self, e: self.binary(e, "//"),
+            exp.IsInf: rename_func("ISINF"),
+            exp.IsNan: rename_func("ISNAN"),
             exp.JSONExtract: arrow_json_extract_sql,
             exp.JSONExtractScalar: arrow_json_extract_scalar_sql,
             exp.JSONFormat: _json_format_sql,
@@ -217,8 +286,24 @@ class DuckDB(Dialect):
             exp.JSONBExtractScalar: arrow_json_extract_scalar_sql,
             exp.LogicalOr: rename_func("BOOL_OR"),
             exp.LogicalAnd: rename_func("BOOL_AND"),
+            exp.MonthsBetween: lambda self, e: self.func(
+                "DATEDIFF",
+                "'month'",
+                exp.cast(e.expression, "timestamp", copy=True),
+                exp.cast(e.this, "timestamp", copy=True),
+            ),
+            exp.ParseJSON: rename_func("JSON"),
+            exp.PercentileCont: rename_func("QUANTILE_CONT"),
+            exp.PercentileDisc: rename_func("QUANTILE_DISC"),
             exp.Properties: no_properties_sql,
             exp.RegexpExtract: regexp_extract_sql,
+            exp.RegexpReplace: lambda self, e: self.func(
+                "REGEXP_REPLACE",
+                e.this,
+                e.expression,
+                e.args.get("replacement"),
+                e.args.get("modifiers"),
+            ),
             exp.RegexpLike: rename_func("REGEXP_MATCHES"),
             exp.RegexpSplit: rename_func("STR_SPLIT_REGEX"),
             exp.SafeDivide: no_safe_divide_sql,
@@ -229,6 +314,7 @@ class DuckDB(Dialect):
             exp.StrToTime: str_to_time_sql,
             exp.StrToUnix: lambda self, e: f"EPOCH(STRPTIME({self.sql(e, 'this')}, {self.format_time(e)}))",
             exp.Struct: _struct_sql,
+            exp.Timestamp: no_timestamp_sql,
             exp.TimestampTrunc: timestamptrunc_sql,
             exp.TimeStrToDate: lambda self, e: f"CAST({self.sql(e, 'this')} AS DATE)",
             exp.TimeStrToTime: timestrtotime_sql,
@@ -241,7 +327,9 @@ class DuckDB(Dialect):
             exp.UnixToStr: lambda self, e: f"STRFTIME(TO_TIMESTAMP({self.sql(e, 'this')}), {self.format_time(e)})",
             exp.UnixToTime: rename_func("TO_TIMESTAMP"),
             exp.UnixToTimeStr: lambda self, e: f"CAST(TO_TIMESTAMP({self.sql(e, 'this')}) AS TEXT)",
+            exp.VariancePop: rename_func("VAR_POP"),
             exp.WeekOfYear: rename_func("WEEKOFYEAR"),
+            exp.Xor: bool_xor_sql,
         }
 
         TYPE_MAPPING = {
@@ -254,6 +342,9 @@ class DuckDB(Dialect):
             exp.DataType.Type.UINT: "UINTEGER",
             exp.DataType.Type.VARBINARY: "BLOB",
             exp.DataType.Type.VARCHAR: "TEXT",
+            exp.DataType.Type.TIMESTAMP_S: "TIMESTAMP_S",
+            exp.DataType.Type.TIMESTAMP_MS: "TIMESTAMP_MS",
+            exp.DataType.Type.TIMESTAMP_NS: "TIMESTAMP_NS",
         }
 
         STAR_MAPPING = {**generator.Generator.STAR_MAPPING, "except": "EXCLUDE"}
@@ -264,6 +355,9 @@ class DuckDB(Dialect):
             **generator.Generator.PROPERTIES_LOCATION,
             exp.VolatileProperty: exp.Properties.Location.UNSUPPORTED,
         }
+
+        def propertyeq_sql(self, expression: exp.PropertyEQ) -> str:
+            return self.binary(expression, ":=")
 
         def interval_sql(self, expression: exp.Interval) -> str:
             multiplier: t.Optional[int] = None

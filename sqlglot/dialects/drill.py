@@ -16,8 +16,8 @@ from sqlglot.dialects.dialect import (
 )
 
 
-def _date_add_sql(kind: str) -> t.Callable[[generator.Generator, exp.DateAdd | exp.DateSub], str]:
-    def func(self: generator.Generator, expression: exp.DateAdd | exp.DateSub) -> str:
+def _date_add_sql(kind: str) -> t.Callable[[Drill.Generator, exp.DateAdd | exp.DateSub], str]:
+    def func(self: Drill.Generator, expression: exp.DateAdd | exp.DateSub) -> str:
         this = self.sql(expression, "this")
         unit = exp.var(expression.text("unit").upper() or "DAY")
         return (
@@ -27,7 +27,7 @@ def _date_add_sql(kind: str) -> t.Callable[[generator.Generator, exp.DateAdd | e
     return func
 
 
-def _str_to_date(self: generator.Generator, expression: exp.StrToDate) -> str:
+def _str_to_date(self: Drill.Generator, expression: exp.StrToDate) -> str:
     this = self.sql(expression, "this")
     time_format = self.format_time(expression)
     if time_format == Drill.DATE_FORMAT:
@@ -41,6 +41,9 @@ class Drill(Dialect):
     DATE_FORMAT = "'yyyy-MM-dd'"
     DATEINT_FORMAT = "'yyyyMMdd'"
     TIME_FORMAT = "'yyyy-MM-dd HH:mm:ss'"
+    SUPPORTS_USER_DEFINED_TYPES = False
+    SUPPORTS_SEMI_ANTI_JOIN = False
+    TYPED_DIVISION = True
 
     TIME_MAPPING = {
         "y": "%Y",
@@ -75,7 +78,6 @@ class Drill(Dialect):
     }
 
     class Tokenizer(tokens.Tokenizer):
-        QUOTES = ["'"]
         IDENTIFIERS = ["`"]
         STRING_ESCAPES = ["\\"]
         ENCODE = "utf-8"
@@ -97,6 +99,7 @@ class Drill(Dialect):
         JOIN_HINTS = False
         TABLE_HINTS = False
         QUERY_HINTS = False
+        NVL2_SUPPORTED = False
 
         TYPE_MAPPING = {
             **generator.Generator.TYPE_MAPPING,
@@ -136,7 +139,9 @@ class Drill(Dialect):
             exp.StrPosition: str_position_sql,
             exp.StrToDate: _str_to_date,
             exp.Pow: rename_func("POW"),
-            exp.Select: transforms.preprocess([transforms.eliminate_distinct_on]),
+            exp.Select: transforms.preprocess(
+                [transforms.eliminate_distinct_on, transforms.eliminate_semi_and_anti_joins]
+            ),
             exp.StrToTime: lambda self, e: f"TO_TIMESTAMP({self.sql(e, 'this')}, {self.format_time(e)})",
             exp.TimeStrToDate: lambda self, e: f"CAST({self.sql(e, 'this')} AS DATE)",
             exp.TimeStrToTime: timestrtotime_sql,

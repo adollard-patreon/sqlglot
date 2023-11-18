@@ -17,6 +17,7 @@ setup(
         "local_scheme": "no-local-version",
     },
     setup_requires=["setuptools_scm"],
+    python_requires=">=3.7",
     extras_require={
         "dev": [
             "autoflake",
@@ -29,6 +30,7 @@ setup(
             "python-dateutil",
             "pdoc",
             "pre-commit",
+            "types-python-dateutil",
         ],
     },
     classifiers=[

@@ -39,10 +39,14 @@ def optimize_joins(expression):
                     if len(other_table_names(dep)) < 2:
                         continue
 
+                    operator = type(on)
                     for predicate in on.flatten():
                         if name in exp.column_table_names(predicate):
                             predicate.replace(exp.true())
-                            join.on(predicate, copy=False)
+                            predicate = exp._combine(
+                                [join.args.get("on"), predicate], operator, copy=False
+                            )
+                            join.on(predicate, append=False, copy=False)
 
     expression = reorder_joins(expression)
     expression = normalize(expression)
@@ -72,8 +76,13 @@ def normalize(expression):
         if not any(join.args.get(k) for k in JOIN_ATTRS):
             join.set("kind", "CROSS")
 
-        if join.kind != "CROSS":
+        if join.kind == "CROSS":
+            join.set("on", None)
+        else:
             join.set("kind", None)
+
+            if not join.args.get("on") and not join.args.get("using"):
+                join.set("on", exp.true())
     return expression
 
 

@@ -15,6 +15,35 @@ SELECT
   "q"."x" AS "x"
 FROM UNNEST(ARRAY(1, 2)) AS "q"("x", "y");
 
+# title: explode_outer
+# dialect: spark
+# execute: false
+CREATE OR REPLACE TEMPORARY VIEW latest_boo AS
+SELECT
+    TRIM(split(points, ':')[0]) as points_type,
+    TRIM(split(points, ':')[1]) as points_value
+FROM (
+         SELECT
+             explode_outer(split(object_pointsText, ',')) as points
+         FROM (
+                  SELECT
+                      object_pointstext,
+                  FROM boo
+              )
+         WHERE object_pointstext IS NOT NULL
+     );
+CREATE OR REPLACE TEMPORARY VIEW `latest_boo` AS
+SELECT
+  TRIM(SPLIT(`_q_1`.`points`, ':')[0]) AS `points_type`,
+  TRIM(SPLIT(`_q_1`.`points`, ':')[1]) AS `points_value`
+FROM (
+  SELECT
+    EXPLODE_OUTER(SPLIT(`boo`.`object_pointstext`, ',')) AS `points`
+  FROM `boo` AS `boo`
+  WHERE
+    NOT `boo`.`object_pointstext` IS NULL
+) AS `_q_1`;
+
 # title: Union in CTE
 WITH cte AS (
     (
@@ -451,8 +480,8 @@ JOIN "company_table" AS "company_table_2"
 LEFT JOIN "unlocked" AS "unlocked"
   ON "company_table_2"."id" = "unlocked"."company_id"
 WHERE
-  CASE WHEN "unlocked"."company_id" IS NULL THEN 0 ELSE 1 END = FALSE
-  AND NOT "company_table_2"."id" IS NULL;
+  NOT "company_table_2"."id" IS NULL
+  AND CASE WHEN "unlocked"."company_id" IS NULL THEN 0 ELSE 1 END = FALSE;
 
 # title: db.table alias clash
 # execute: false
@@ -577,10 +606,10 @@ FROM `u_cte` AS `u_cte` PIVOT(SUM(`u_cte`.`f`) AS `sum` FOR `u_cte`.`h` IN ('x',
 # dialect: snowflake
 SELECT * FROM u PIVOT (SUM(f) FOR h IN ('x', 'y'));
 SELECT
-  "_Q_0"."G" AS "G",
-  "_Q_0"."'x'" AS "'x'",
-  "_Q_0"."'y'" AS "'y'"
-FROM "U" AS "U" PIVOT(SUM("U"."F") FOR "U"."H" IN ('x', 'y')) AS "_Q_0"
+  "_q_0"."G" AS "G",
+  "_q_0"."'x'" AS "'x'",
+  "_q_0"."'y'" AS "'y'"
+FROM "U" AS "U" PIVOT(SUM("U"."F") FOR "U"."H" IN ('x', 'y')) AS "_q_0"
 ;
 
 # title: selecting all columns from a pivoted source and generating spark
@@ -638,7 +667,7 @@ SELECT
 FROM "users" AS "u"
 CROSS JOIN LATERAL (
   SELECT
-    "l"."log_date"
+    "l"."log_date" AS "log_date"
   FROM "logs" AS "l"
   WHERE
     "l"."log_date" <= 100 AND "l"."user_id" = "u"."user_id"
@@ -668,13 +697,13 @@ WHERE
 GROUP BY `dAy`, `top_term`, rank
 ORDER BY `DaY` DESC;
 SELECT
-  `top_terms`.`refresh_date` AS `day`,
-  `top_terms`.`term` AS `top_term`,
-  `top_terms`.`rank` AS `rank`
-FROM `bigquery-public-data`.`GooGle_tReNDs`.`TOp_TeRmS` AS `top_terms`
+  `TOp_TeRmS`.`refresh_date` AS `day`,
+  `TOp_TeRmS`.`term` AS `top_term`,
+  `TOp_TeRmS`.`rank` AS `rank`
+FROM `bigquery-public-data`.`GooGle_tReNDs`.`TOp_TeRmS` AS `TOp_TeRmS`
 WHERE
-  `top_terms`.`rank` = 1
-  AND CAST(`top_terms`.`refresh_date` AS DATE) >= DATE_SUB(CURRENT_DATE, INTERVAL 2 WEEK)
+  `TOp_TeRmS`.`rank` = 1
+  AND CAST(`TOp_TeRmS`.`refresh_date` AS DATE) >= DATE_SUB(CURRENT_DATE, INTERVAL 2 WEEK)
 GROUP BY
   `day`,
   `top_term`,
@@ -806,3 +835,242 @@ LEFT JOIN (
       ON "y"."c" = "z"."c"
 )
   ON "x"."b" = "y"."b";
+
+# title: select * from wrapped subquery
+# execute: false
+SELECT * FROM ((SELECT * FROM tbl));
+WITH "_q_0" AS (
+  SELECT
+    *
+  FROM "tbl" AS "tbl"
+)
+SELECT
+  *
+FROM (
+  "_q_0" AS "_q_0"
+);
+
+# title: select * from wrapped subquery joined to a table (known schema)
+SELECT * FROM ((SELECT * FROM x) INNER JOIN y ON a = c);
+SELECT
+  "x"."a" AS "a",
+  "x"."b" AS "b",
+  "y"."b" AS "b",
+  "y"."c" AS "c"
+FROM (
+  "x" AS "x"
+    JOIN "y" AS "y"
+      ON "x"."a" = "y"."c"
+);
+
+# title: select * from wrapped subquery joined to a table (unknown schema)
+# execute: false
+SELECT * FROM ((SELECT c FROM t1) JOIN t2);
+WITH "_q_0" AS (
+  SELECT
+    "t1"."c" AS "c"
+  FROM "t1" AS "t1"
+)
+SELECT
+  *
+FROM (
+  "_q_0" AS "_q_0"
+    CROSS JOIN "t2" AS "t2"
+);
+
+# title: select specific columns from wrapped subquery joined to a table
+SELECT b FROM ((SELECT a FROM x) INNER JOIN y ON a = b);
+SELECT
+  "y"."b" AS "b"
+FROM (
+  "x" AS "x"
+    JOIN "y" AS "y"
+      ON "x"."a" = "y"."b"
+);
+
+# title: select * from wrapped join of subqueries (unknown schema)
+# execute: false
+SELECT * FROM ((SELECT * FROM t1) JOIN (SELECT * FROM t2));
+WITH "_q_0" AS (
+  SELECT
+    *
+  FROM "t1" AS "t1"
+), "_q_1" AS (
+  SELECT
+    *
+  FROM "t2" AS "t2"
+)
+SELECT
+  *
+FROM (
+  "_q_0" AS "_q_0"
+    CROSS JOIN "_q_1" AS "_q_1"
+);
+
+# title: select * from wrapped join of subqueries (known schema)
+SELECT * FROM ((SELECT * FROM x) INNER JOIN (SELECT * FROM y) ON a = c);
+SELECT
+  "x"."a" AS "a",
+  "x"."b" AS "b",
+  "y"."b" AS "b",
+  "y"."c" AS "c"
+FROM (
+  "x" AS "x"
+    JOIN "y" AS "y"
+      ON "x"."a" = "y"."c"
+);
+
+# title: replace scalar subquery, wrap resulting column in a MAX
+SELECT a, SUM(c) / (SELECT SUM(c) FROM y) * 100 AS foo FROM y INNER JOIN x ON y.b = x.b GROUP BY a;
+WITH "_u_0" AS (
+  SELECT
+    SUM("y"."c") AS "_col_0"
+  FROM "y" AS "y"
+)
+SELECT
+  "x"."a" AS "a",
+  SUM("y"."c") / MAX("_u_0"."_col_0") * 100 AS "foo"
+FROM "y" AS "y"
+CROSS JOIN "_u_0" AS "_u_0"
+JOIN "x" AS "x"
+  ON "y"."b" = "x"."b"
+GROUP BY
+  "x"."a";
+
+# title: select * from a cte, which had one of its two columns aliased
+WITH cte(x, y) AS (SELECT 1, 2) SELECT * FROM cte AS cte(a);
+WITH "cte" AS (
+  SELECT
+    1 AS "x",
+    2 AS "y"
+)
+SELECT
+  "cte"."a" AS "a",
+  "cte"."y" AS "y"
+FROM "cte" AS "cte"("a");
+
+# title: select single column from a cte using its alias
+WITH cte(x) AS (SELECT 1) SELECT a FROM cte AS cte(a);
+WITH "cte" AS (
+  SELECT
+    1 AS "x"
+)
+SELECT
+  "cte"."a" AS "a"
+FROM "cte" AS "cte"("a");
+
+# title: joined ctes with a "using" clause, one of which has had its column aliased
+WITH m(a) AS (SELECT 1), n(b) AS (SELECT 1) SELECT * FROM m JOIN n AS foo(a) USING (a);
+WITH "m" AS (
+  SELECT
+    1 AS "a"
+), "n" AS (
+  SELECT
+    1 AS "b"
+)
+SELECT
+  COALESCE("m"."a", "foo"."a") AS "a"
+FROM "m"
+JOIN "n" AS "foo"("a")
+  ON "m"."a" = "foo"."a";
+
+# title: reduction of string concatenation that uses CONCAT(..), || and +
+# execute: false
+SELECT CONCAT('a', 'b') || CONCAT(CONCAT('c', 'd'), CONCAT('e', 'f')) + ('g' || 'h' || 'i');
+SELECT
+  'abcdefghi' AS "_col_0";
+
+# title: complex query with derived tables and redundant parentheses
+# execute: false
+# dialect: snowflake
+SELECT
+  ("SUBQUERY_0"."KEY") AS "SUBQUERY_1_COL_0"
+FROM
+  (
+    SELECT
+      *
+    FROM
+      (((
+          SELECT
+            *
+          FROM
+            (
+              SELECT
+                event_name AS key,
+                insert_ts
+              FROM
+                (
+                  SELECT
+                    insert_ts,
+                    event_name
+                  FROM
+                    sales
+                  WHERE
+                    insert_ts > '2023-08-07 21:03:35.590 -0700'
+                )
+            )
+      ))) AS "SF_CONNECTOR_QUERY_ALIAS"
+  ) AS "SUBQUERY_0";
+SELECT
+  "SALES"."EVENT_NAME" AS "SUBQUERY_1_COL_0"
+FROM "SALES" AS "SALES"
+WHERE
+  "SALES"."INSERT_TS" > '2023-08-07 21:03:35.590 -0700';
+
+# title: using join without select *
+# execute: false
+with
+    alias1 as (select * from table1),
+    alias2 as (select * from table2),
+    alias3 as (
+        select
+            cid,
+            min(od) as m_od,
+            count(odi) as c_od,
+        from alias2
+        group by 1
+    )
+select
+    alias1.cid,
+    alias3.m_od,
+    coalesce(alias3.c_od, 0) as c_od,
+from alias1
+left join alias3 using (cid);
+WITH "alias3" AS (
+  SELECT
+    "table2"."cid" AS "cid",
+    MIN("table2"."od") AS "m_od",
+    COUNT("table2"."odi") AS "c_od"
+  FROM "table2" AS "table2"
+  GROUP BY
+    "table2"."cid"
+)
+SELECT
+  "table1"."cid" AS "cid",
+  "alias3"."m_od" AS "m_od",
+  COALESCE("alias3"."c_od", 0) AS "c_od"
+FROM "table1" AS "table1"
+LEFT JOIN "alias3"
+  ON "table1"."cid" = "alias3"."cid";
+
+# title: CTE with EXPLODE cannot be merged
+# dialect: spark
+# execute: false
+SELECT Name,
+       FruitStruct.`$id`,
+       FruitStruct.value
+  FROM
+       (SELECT Name,
+               explode(Fruits) as FruitStruct
+          FROM fruits_table);
+WITH `_q_0` AS (
+  SELECT
+    `fruits_table`.`name` AS `name`,
+    EXPLODE(`fruits_table`.`fruits`) AS `fruitstruct`
+  FROM `fruits_table` AS `fruits_table`
+)
+SELECT
+  `_q_0`.`name` AS `name`,
+  `_q_0`.`fruitstruct`.`$id` AS `$id`,
+  `_q_0`.`fruitstruct`.`value` AS `value`
+FROM `_q_0` AS `_q_0`;

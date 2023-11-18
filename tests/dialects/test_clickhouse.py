@@ -6,6 +6,53 @@ class TestClickhouse(Validator):
     dialect = "clickhouse"
 
     def test_clickhouse(self):
+        self.validate_identity("x <> y")
+
+        self.validate_all(
+            "has([1], x)",
+            read={
+                "postgres": "x = any(array[1])",
+            },
+        )
+        self.validate_all(
+            "NOT has([1], x)",
+            read={
+                "postgres": "any(array[1]) <> x",
+            },
+        )
+        self.validate_identity("x = y")
+
+        string_types = [
+            "BLOB",
+            "LONGBLOB",
+            "LONGTEXT",
+            "MEDIUMBLOB",
+            "MEDIUMTEXT",
+            "TINYBLOB",
+            "TINYTEXT",
+            "VARCHAR(255)",
+        ]
+
+        for string_type in string_types:
+            self.validate_identity(f"CAST(x AS {string_type})", "CAST(x AS String)")
+
+        expr = parse_one("count(x)")
+        self.assertEqual(expr.sql(dialect="clickhouse"), "COUNT(x)")
+        self.assertIsNone(expr._meta)
+
+        self.validate_identity("SELECT * FROM (SELECT a FROM b SAMPLE 0.01)")
+        self.validate_identity("SELECT * FROM (SELECT a FROM b SAMPLE 1 / 10 OFFSET 1 / 2)")
+        self.validate_identity("SELECT sum(foo * bar) FROM bla SAMPLE 10000000")
+        self.validate_identity("CAST(x AS Nested(ID UInt32, Serial UInt32, EventTime DATETIME))")
+        self.validate_identity("CAST(x AS Enum('hello' = 1, 'world' = 2))")
+        self.validate_identity("CAST(x AS Enum('hello', 'world'))")
+        self.validate_identity("CAST(x AS Enum('hello' = 1, 'world'))")
+        self.validate_identity("CAST(x AS Enum8('hello' = -123, 'world'))")
+        self.validate_identity("CAST(x AS FixedString(1))")
+        self.validate_identity("CAST(x AS LowCardinality(FixedString))")
+        self.validate_identity("SELECT isNaN(1.0)")
+        self.validate_identity("SELECT startsWith('Spider-Man', 'Spi')")
+        self.validate_identity("SELECT xor(TRUE, FALSE)")
         self.validate_identity("ATTACH DATABASE DEFAULT ENGINE = ORDINARY")
         self.validate_identity("CAST(['hello'], 'Array(Enum8(''hello'' = 1))')")
         self.validate_identity("SELECT x, COUNT() FROM y GROUP BY x WITH TOTALS")
@@ -33,8 +80,10 @@ class TestClickhouse(Validator):
         self.validate_identity("position(haystack, needle)")
         self.validate_identity("position(haystack, needle, position)")
         self.validate_identity("CAST(x AS DATETIME)")
+        self.validate_identity("CAST(x as MEDIUMINT)", "CAST(x AS Int32)")
+
         self.validate_identity(
-            'SELECT CAST(tuple(1 AS "a", 2 AS "b", 3.0 AS "c").2 AS Nullable(TEXT))'
+            'SELECT CAST(tuple(1 AS "a", 2 AS "b", 3.0 AS "c").2 AS Nullable(String))'
         )
         self.validate_identity(
             "CREATE TABLE test (id UInt8) ENGINE=AggregatingMergeTree() ORDER BY tuple()"
@@ -53,11 +102,106 @@ class TestClickhouse(Validator):
         )
 
         self.validate_all(
-            "CONCAT(CASE WHEN COALESCE(CAST(a AS TEXT), '') IS NULL THEN COALESCE(CAST(a AS TEXT), '') ELSE CAST(COALESCE(CAST(a AS TEXT), '') AS TEXT) END, CASE WHEN COALESCE(CAST(b AS TEXT), '') IS NULL THEN COALESCE(CAST(b AS TEXT), '') ELSE CAST(COALESCE(CAST(b AS TEXT), '') AS TEXT) END)",
+            "SELECT CAST('2020-01-01' AS TIMESTAMP) + INTERVAL '500' microsecond",
+            read={
+                "duckdb": "SELECT TIMESTAMP '2020-01-01' + INTERVAL '500 us'",
+                "postgres": "SELECT TIMESTAMP '2020-01-01' + INTERVAL '500 us'",
+            },
+        )
+        self.validate_all(
+            "SELECT CURRENT_DATE()",
+            read={
+                "clickhouse": "SELECT CURRENT_DATE()",
+                "postgres": "SELECT CURRENT_DATE",
+            },
+        )
+        self.validate_all(
+            "SELECT CURRENT_TIMESTAMP()",
+            read={
+                "clickhouse": "SELECT CURRENT_TIMESTAMP()",
+                "postgres": "SELECT CURRENT_TIMESTAMP",
+            },
+        )
+        self.validate_all(
+            "SELECT match('ThOmAs', CONCAT('(?i)', 'thomas'))",
+            read={
+                "postgres": "SELECT 'ThOmAs' ~* 'thomas'",
+            },
+        )
+        self.validate_all(
+            "SELECT match('ThOmAs', CONCAT('(?i)', x)) FROM t",
+            read={
+                "postgres": "SELECT 'ThOmAs' ~* x FROM t",
+            },
+        )
+        self.validate_all(
+            "SELECT '\\0'",
+            read={
+                "mysql": "SELECT '\0'",
+            },
+            write={
+                "clickhouse": "SELECT '\\0'",
+                "mysql": "SELECT '\0'",
+            },
+        )
+        self.validate_all(
+            "DATE_ADD('day', 1, x)",
+            read={
+                "clickhouse": "dateAdd(day, 1, x)",
+                "presto": "DATE_ADD('day', 1, x)",
+            },
+            write={
+                "clickhouse": "DATE_ADD('day', 1, x)",
+                "presto": "DATE_ADD('day', 1, x)",
+                "": "DATE_ADD(x, 1, 'day')",
+            },
+        )
+        self.validate_all(
+            "DATE_DIFF('day', a, b)",
+            read={
+                "clickhouse": "dateDiff('day', a, b)",
+                "presto": "DATE_DIFF('day', a, b)",
+            },
+            write={
+                "clickhouse": "DATE_DIFF('day', a, b)",
+                "presto": "DATE_DIFF('day', a, b)",
+                "": "DATEDIFF(b, a, day)",
+            },
+        )
+        self.validate_all(
+            "SELECT xor(1, 0)",
+            read={
+                "clickhouse": "SELECT xor(1, 0)",
+                "mysql": "SELECT 1 XOR 0",
+            },
+            write={
+                "mysql": "SELECT 1 XOR 0",
+            },
+        )
+        self.validate_all(
+            "SELECT xor(0, 1, xor(1, 0, 0))",
+            write={
+                "clickhouse": "SELECT xor(0, 1, xor(1, 0, 0))",
+                "mysql": "SELECT 0 XOR 1 XOR 1 XOR 0 XOR 0",
+            },
+        )
+        self.validate_all(
+            "SELECT xor(xor(1, 0), 1)",
+            read={
+                "clickhouse": "SELECT xor(xor(1, 0), 1)",
+                "mysql": "SELECT 1 XOR 0 XOR 1",
+            },
+            write={
+                "clickhouse": "SELECT xor(xor(1, 0), 1)",
+                "mysql": "SELECT 1 XOR 0 XOR 1",
+            },
+        )
+        self.validate_all(
+            "CONCAT(CASE WHEN COALESCE(CAST(a AS String), '') IS NULL THEN COALESCE(CAST(a AS String), '') ELSE CAST(COALESCE(CAST(a AS String), '') AS String) END, CASE WHEN COALESCE(CAST(b AS String), '') IS NULL THEN COALESCE(CAST(b AS String), '') ELSE CAST(COALESCE(CAST(b AS String), '') AS String) END)",
             read={"postgres": "CONCAT(a, b)"},
         )
         self.validate_all(
-            "CONCAT(CASE WHEN a IS NULL THEN a ELSE CAST(a AS TEXT) END, CASE WHEN b IS NULL THEN b ELSE CAST(b AS TEXT) END)",
+            "CONCAT(CASE WHEN a IS NULL THEN a ELSE CAST(a AS String) END, CASE WHEN b IS NULL THEN b ELSE CAST(b AS String) END)",
             read={"mysql": "CONCAT(a, b)"},
         )
         self.validate_all(
@@ -75,8 +219,8 @@ class TestClickhouse(Validator):
         self.validate_all(
             "SELECT fname, lname, age FROM person ORDER BY age DESC NULLS FIRST, fname ASC NULLS LAST, lname",
             write={
-                "clickhouse": "SELECT fname, lname, age FROM person ORDER BY age DESC NULLS FIRST, fname, lname",
-                "spark": "SELECT fname, lname, age FROM person ORDER BY age DESC NULLS FIRST, fname NULLS LAST, lname NULLS LAST",
+                "clickhouse": "SELECT fname, lname, age FROM person ORDER BY age DESC NULLS FIRST, fname ASC, lname",
+                "spark": "SELECT fname, lname, age FROM person ORDER BY age DESC NULLS FIRST, fname ASC NULLS LAST, lname NULLS LAST",
             },
         )
         self.validate_all(
@@ -133,9 +277,41 @@ class TestClickhouse(Validator):
             ORDER BY loyalty ASC
             """,
             write={
-                "clickhouse": "SELECT loyalty, COUNT() FROM hits LEFT SEMI JOIN users USING (UserID)"
-                + " GROUP BY loyalty ORDER BY loyalty"
+                "clickhouse": "SELECT loyalty, count() FROM hits LEFT SEMI JOIN users USING (UserID)"
+                " GROUP BY loyalty ORDER BY loyalty ASC"
             },
+        )
+        self.validate_identity("SELECT s, arr FROM arrays_test ARRAY JOIN arr")
+        self.validate_identity("SELECT s, arr, a FROM arrays_test LEFT ARRAY JOIN arr AS a")
+        self.validate_identity(
+            "SELECT s, arr_external FROM arrays_test ARRAY JOIN [1, 2, 3] AS arr_external"
+        )
+        self.validate_all(
+            "SELECT quantile(0.5)(a)",
+            read={"duckdb": "SELECT quantile(a, 0.5)"},
+            write={"clickhouse": "SELECT quantile(0.5)(a)"},
+        )
+        self.validate_all(
+            "SELECT quantiles(0.5, 0.4)(a)",
+            read={"duckdb": "SELECT quantile(a, [0.5, 0.4])"},
+            write={"clickhouse": "SELECT quantiles(0.5, 0.4)(a)"},
+        )
+        self.validate_all(
+            "SELECT quantiles(0.5)(a)",
+            read={"duckdb": "SELECT quantile(a, [0.5])"},
+            write={"clickhouse": "SELECT quantiles(0.5)(a)"},
+        )
+
+        self.validate_identity("SELECT isNaN(x)")
+        self.validate_all(
+            "SELECT IS_NAN(x), ISNAN(x)",
+            write={"clickhouse": "SELECT isNaN(x), isNaN(x)"},
+        )
+
+        self.validate_identity("SELECT startsWith('a', 'b')")
+        self.validate_all(
+            "SELECT STARTS_WITH('a', 'b'), STARTSWITH('a', 'b')",
+            write={"clickhouse": "SELECT startsWith('a', 'b'), startsWith('a', 'b')"},
         )
 
     def test_cte(self):
@@ -143,6 +319,10 @@ class TestClickhouse(Validator):
         self.validate_identity("WITH SUM(bytes) AS foo SELECT foo FROM system.parts")
         self.validate_identity("WITH (SELECT foo) AS bar SELECT bar + 5")
         self.validate_identity("WITH test1 AS (SELECT i + 1, j + 1 FROM test1) SELECT * FROM test1")
+
+        query = parse_one("""WITH (SELECT 1) AS y SELECT * FROM y""", read="clickhouse")
+        self.assertIsInstance(query.args["with"].expressions[0].this, exp.Subquery)
+        self.assertEqual(query.args["with"].expressions[0].alias, "y")
 
     def test_ternary(self):
         self.validate_all("x ? 1 : 2", write={"clickhouse": "CASE WHEN x THEN 1 ELSE 2 END"})
@@ -186,7 +366,7 @@ class TestClickhouse(Validator):
         self.validate_all(
             "SELECT {abc: UInt32}, {b: String}, {c: DateTime},{d: Map(String, Array(UInt8))}, {e: Tuple(UInt8, String)}",
             write={
-                "clickhouse": "SELECT {abc: UInt32}, {b: TEXT}, {c: DATETIME}, {d: Map(TEXT, Array(UInt8))}, {e: Tuple(UInt8, String)}",
+                "clickhouse": "SELECT {abc: UInt32}, {b: String}, {c: DATETIME}, {d: Map(String, Array(UInt8))}, {e: Tuple(UInt8, String)}",
                 "": "SELECT :abc, :b, :c, :d, :e",
             },
         )
@@ -213,10 +393,13 @@ class TestClickhouse(Validator):
         for data_type in data_types:
             self.validate_all(
                 f"pow(2, 32)::{data_type}",
-                write={"clickhouse": f"CAST(POWER(2, 32) AS {data_type})"},
+                write={"clickhouse": f"CAST(pow(2, 32) AS {data_type})"},
             )
 
     def test_ddl(self):
+        self.validate_identity(
+            'CREATE TABLE data5 ("x" UInt32, "y" UInt32) ENGINE=MergeTree ORDER BY (round(y / 1000000000), cityHash64(x)) SAMPLE BY cityHash64(x)'
+        )
         self.validate_identity(
             "CREATE TABLE foo (x UInt32) TTL time_column + INTERVAL '1' MONTH DELETE WHERE column = 'value'"
         )
@@ -236,8 +419,8 @@ class TestClickhouse(Validator):
                 "clickhouse": """CREATE TABLE example1 (
   timestamp DATETIME,
   x UInt32 TTL now() + INTERVAL '1' MONTH,
-  y TEXT TTL timestamp + INTERVAL '1' DAY,
-  z TEXT
+  y String TTL timestamp + INTERVAL '1' DAY,
+  z String
 )
 ENGINE=MergeTree
 ORDER BY tuple()""",
@@ -258,7 +441,7 @@ ORDER BY tuple()""",
                 "clickhouse": """CREATE TABLE test (
   id UInt64,
   timestamp DateTime64,
-  data TEXT,
+  data String,
   max_hits UInt64,
   sum_hits UInt64
 )
@@ -270,8 +453,8 @@ GROUP BY
   id,
   toStartOfDay(timestamp)
 SET
-  max_hits = MAX(max_hits),
-  sum_hits = SUM(sum_hits)""",
+  max_hits = max(max_hits),
+  sum_hits = sum(sum_hits)""",
             },
             pretty=True,
         )
@@ -285,8 +468,8 @@ SET
             """,
             write={
                 "clickhouse": """CREATE TABLE test (
-  id TEXT,
-  data TEXT
+  id String,
+  data String
 )
 ENGINE=AggregatingMergeTree()
 ORDER BY tuple()
@@ -369,7 +552,7 @@ WHERE
                 "clickhouse": """CREATE TABLE table_for_recompression (
   d DATETIME,
   key UInt64,
-  value TEXT
+  value String
 )
 ENGINE=MergeTree()
 ORDER BY tuple()
@@ -413,8 +596,8 @@ GROUP BY
   k1,
   k2
 SET
-  x = MAX(x),
-  y = MIN(y)""",
+  x = max(x),
+  y = min(y)""",
             },
             pretty=True,
         )
@@ -465,9 +648,9 @@ RANGE(MIN discount_start_date MAX discount_end_date)""",
             """,
             write={
                 "clickhouse": """CREATE DICTIONARY my_ip_trie_dictionary (
-  prefix TEXT,
+  prefix String,
   asn UInt32,
-  cca2 TEXT DEFAULT '??'
+  cca2 String DEFAULT '??'
 )
 PRIMARY KEY (prefix)
 SOURCE(CLICKHOUSE(
@@ -493,7 +676,7 @@ LIFETIME(MIN 0 MAX 3600)""",
             write={
                 "clickhouse": """CREATE DICTIONARY polygons_test_dictionary (
   key Array(Array(Array(Tuple(Float64, Float64)))),
-  name TEXT
+  name String
 )
 PRIMARY KEY (key)
 SOURCE(CLICKHOUSE(
