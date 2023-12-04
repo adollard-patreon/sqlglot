@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import typing as t
 
-from sqlglot import exp, generator, parser, tokens
+from sqlglot import exp, generator, parser, tokens, transforms
 from sqlglot.dialects.dialect import (
     Dialect,
     approx_count_distinct_sql,
@@ -36,7 +36,8 @@ from sqlglot.tokens import TokenType
 def _ts_or_ds_add_sql(self: DuckDB.Generator, expression: exp.TsOrDsAdd) -> str:
     this = self.sql(expression, "this")
     unit = self.sql(expression, "unit").strip("'") or "DAY"
-    return f"CAST({this} AS DATE) + {self.sql(exp.Interval(this=expression.expression, unit=unit))}"
+    interval = self.sql(exp.Interval(this=expression.expression, unit=unit))
+    return f"CAST({this} AS {self.sql(expression.return_type)}) + {interval}"
 
 
 def _date_delta_sql(self: DuckDB.Generator, expression: exp.DateAdd | exp.DateSub) -> str:
@@ -106,10 +107,27 @@ def _json_format_sql(self: DuckDB.Generator, expression: exp.JSONFormat) -> str:
     return f"CAST({sql} AS TEXT)"
 
 
+def _unix_to_time_sql(self: DuckDB.Generator, expression: exp.UnixToTime) -> str:
+    scale = expression.args.get("scale")
+    timestamp = self.sql(expression, "this")
+    if scale in (None, exp.UnixToTime.SECONDS):
+        return f"TO_TIMESTAMP({timestamp})"
+    if scale == exp.UnixToTime.MILLIS:
+        return f"EPOCH_MS({timestamp})"
+    if scale == exp.UnixToTime.MICROS:
+        return f"MAKE_TIMESTAMP({timestamp})"
+    if scale == exp.UnixToTime.NANOS:
+        return f"TO_TIMESTAMP({timestamp} / 1000000000)"
+
+    self.unsupported(f"Unsupported scale for timestamp: {scale}.")
+    return ""
+
+
 class DuckDB(Dialect):
     NULL_ORDERING = "nulls_are_last"
     SUPPORTS_USER_DEFINED_TYPES = False
     SAFE_DIVISION = True
+    INDEX_OFFSET = 1
 
     # https://duckdb.org/docs/sql/introduction.html#creating-a-new-table
     RESOLVES_IDENTIFIERS_AS_UPPERCASE = None
@@ -117,7 +135,6 @@ class DuckDB(Dialect):
     class Tokenizer(tokens.Tokenizer):
         KEYWORDS = {
             **tokens.Tokenizer.KEYWORDS,
-            ":=": TokenType.COLON_EQ,
             "//": TokenType.DIV,
             "ATTACH": TokenType.COMMAND,
             "BINARY": TokenType.VARBINARY,
@@ -150,6 +167,7 @@ class DuckDB(Dialect):
 
         FUNCTIONS = {
             **parser.Parser.FUNCTIONS,
+            "ARRAY_HAS": exp.ArrayContains.from_arg_list,
             "ARRAY_LENGTH": exp.ArraySize.from_arg_list,
             "ARRAY_SORT": exp.SortArray.from_arg_list,
             "ARRAY_REVERSE_SORT": _sort_array_reverse,
@@ -159,11 +177,15 @@ class DuckDB(Dialect):
             "DATETRUNC": date_trunc_to_time,
             "EPOCH": exp.TimeToUnix.from_arg_list,
             "EPOCH_MS": lambda args: exp.UnixToTime(
-                this=exp.Div(this=seq_get(args, 0), expression=exp.Literal.number(1000))
+                this=seq_get(args, 0), scale=exp.UnixToTime.MILLIS
             ),
+            "LIST_HAS": exp.ArrayContains.from_arg_list,
             "LIST_REVERSE_SORT": _sort_array_reverse,
             "LIST_SORT": exp.SortArray.from_arg_list,
             "LIST_VALUE": exp.Array.from_arg_list,
+            "MAKE_TIMESTAMP": lambda args: exp.UnixToTime(
+                this=seq_get(args, 0), scale=exp.UnixToTime.MICROS
+            ),
             "MEDIAN": lambda args: exp.PercentileCont(
                 this=seq_get(args, 0), expression=exp.Literal.number(0.5)
             ),
@@ -295,6 +317,9 @@ class DuckDB(Dialect):
             exp.ParseJSON: rename_func("JSON"),
             exp.PercentileCont: rename_func("QUANTILE_CONT"),
             exp.PercentileDisc: rename_func("QUANTILE_DISC"),
+            # DuckDB doesn't allow qualified columns inside of PIVOT expressions.
+            # See: https://github.com/duckdb/duckdb/blob/671faf92411182f81dce42ac43de8bfb05d9909e/src/planner/binder/tableref/bind_pivot.cpp#L61-L62
+            exp.Pivot: transforms.preprocess([transforms.unqualify_columns]),
             exp.Properties: no_properties_sql,
             exp.RegexpExtract: regexp_extract_sql,
             exp.RegexpReplace: lambda self, e: self.func(
@@ -323,9 +348,15 @@ class DuckDB(Dialect):
             exp.TimeToUnix: rename_func("EPOCH"),
             exp.TsOrDiToDi: lambda self, e: f"CAST(SUBSTR(REPLACE(CAST({self.sql(e, 'this')} AS TEXT), '-', ''), 1, 8) AS INT)",
             exp.TsOrDsAdd: _ts_or_ds_add_sql,
+            exp.TsOrDsDiff: lambda self, e: self.func(
+                "DATE_DIFF",
+                f"'{e.args.get('unit') or 'day'}'",
+                exp.cast(e.expression, "TIMESTAMP"),
+                exp.cast(e.this, "TIMESTAMP"),
+            ),
             exp.TsOrDsToDate: ts_or_ds_to_date_sql("duckdb"),
             exp.UnixToStr: lambda self, e: f"STRFTIME(TO_TIMESTAMP({self.sql(e, 'this')}), {self.format_time(e)})",
-            exp.UnixToTime: rename_func("TO_TIMESTAMP"),
+            exp.UnixToTime: _unix_to_time_sql,
             exp.UnixToTimeStr: lambda self, e: f"CAST(TO_TIMESTAMP({self.sql(e, 'this')}) AS TEXT)",
             exp.VariancePop: rename_func("VAR_POP"),
             exp.WeekOfYear: rename_func("WEEKOFYEAR"),
@@ -355,9 +386,6 @@ class DuckDB(Dialect):
             **generator.Generator.PROPERTIES_LOCATION,
             exp.VolatileProperty: exp.Properties.Location.UNSUPPORTED,
         }
-
-        def propertyeq_sql(self, expression: exp.PropertyEQ) -> str:
-            return self.binary(expression, ":=")
 
         def interval_sql(self, expression: exp.Interval) -> str:
             multiplier: t.Optional[int] = None

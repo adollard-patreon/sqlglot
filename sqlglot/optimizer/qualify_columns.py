@@ -237,7 +237,7 @@ def _expand_order_by(scope: Scope, resolver: Resolver) -> None:
     ordereds = order.expressions
     for ordered, new_expression in zip(
         ordereds,
-        _expand_positional_references(scope, (o.this for o in ordereds)),
+        _expand_positional_references(scope, (o.this for o in ordereds), alias=True),
     ):
         for agg in ordered.find_all(exp.AggFunc):
             for col in agg.find_all(exp.Column):
@@ -259,17 +259,23 @@ def _expand_order_by(scope: Scope, resolver: Resolver) -> None:
             )
 
 
-def _expand_positional_references(scope: Scope, expressions: t.Iterable[E]) -> t.List[E]:
-    new_nodes = []
+def _expand_positional_references(
+    scope: Scope, expressions: t.Iterable[exp.Expression], alias: bool = False
+) -> t.List[exp.Expression]:
+    new_nodes: t.List[exp.Expression] = []
     for node in expressions:
         if node.is_int:
-            select = _select_by_pos(scope, t.cast(exp.Literal, node)).this
+            select = _select_by_pos(scope, t.cast(exp.Literal, node))
 
-            if isinstance(select, exp.Literal):
-                new_nodes.append(node)
+            if alias:
+                new_nodes.append(exp.column(select.args["alias"].copy()))
             else:
-                new_nodes.append(select.copy())
-                scope.clear_cache()
+                select = select.this
+
+                if isinstance(select, exp.Literal):
+                    new_nodes.append(node)
+                else:
+                    new_nodes.append(select.copy())
         else:
             new_nodes.append(node)
 
@@ -383,15 +389,18 @@ def _expand_stars(
                 columns = [name for name in columns if name.upper() not in pseudocolumns]
 
             if columns and "*" not in columns:
+                table_id = id(table)
+                columns_to_exclude = except_columns.get(table_id) or set()
+
                 if pivot and has_pivoted_source and pivot_columns and pivot_output_columns:
                     implicit_columns = [col for col in columns if col not in pivot_columns]
                     new_selections.extend(
                         exp.alias_(exp.column(name, table=pivot.alias), name, copy=False)
                         for name in implicit_columns + pivot_output_columns
+                        if name not in columns_to_exclude
                     )
                     continue
 
-                table_id = id(table)
                 for name in columns:
                     if name in using_column_tables and table in using_column_tables[name]:
                         if name in coalesced_columns:
@@ -408,7 +417,7 @@ def _expand_stars(
                                 copy=False,
                             )
                         )
-                    elif name not in except_columns.get(table_id, set()):
+                    elif name not in columns_to_exclude:
                         alias_ = replace_columns.get(table_id, {}).get(name, name)
                         column = exp.column(name, table=table)
                         new_selections.append(

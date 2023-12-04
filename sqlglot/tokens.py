@@ -276,6 +276,7 @@ class TokenType(AutoName):
     OBJECT_IDENTIFIER = auto()
     OFFSET = auto()
     ON = auto()
+    OPERATOR = auto()
     ORDER_BY = auto()
     ORDERED = auto()
     ORDINALITY = auto()
@@ -526,6 +527,7 @@ class Tokenizer(metaclass=_Tokenizer):
         "<=": TokenType.LTE,
         "<>": TokenType.NEQ,
         "!=": TokenType.NEQ,
+        ":=": TokenType.COLON_EQ,
         "<=>": TokenType.NULLSAFE_EQ,
         "->": TokenType.ARROW,
         "->>": TokenType.DARROW,
@@ -1015,7 +1017,7 @@ class Tokenizer(metaclass=_Tokenizer):
                     skip = True
             else:
                 char = ""
-                chars = " "
+                break
 
         if word:
             if self._scan_string(word):
